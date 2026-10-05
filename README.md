@@ -1,0 +1,163 @@
+# GPU World Pipeline for Fallout 4
+
+An F4SE plugin that moves the draw calls for Fallout 4's static world geometry
+from the CPU to GPU-driven batches, in the spirit of
+[Nvidium](https://github.com/MCRcortex/nvidium) for Minecraft. It is built
+on [CommonLibF4RD](https://github.com/Zzyxz/CommonLibF4RD), so one DLL loads
+on the OG (1.10.163), NG (1.10.984) and AE (1.11.x) runtimes.
+
+> **Status: experimental and not yet tested in game.** The plugin compiles
+> against CommonLibF4RD, and its GPU pipeline passes automated tests on a real
+> Direct3D 11 device. Its renderer hooks still need in-game validation. Every
+> engine assumption is checked at runtime before batching turns on, and a
+> failed check leaves the game rendering exactly as vanilla. See
+> [docs/TESTING.md](docs/TESTING.md) for an in-game test plan.
+
+## Why
+
+Fallout 4's Creation Engine issues one Direct3D 11 draw call per object, per
+render pass, from one CPU thread. Around 7,000-8,000 draw calls is the
+practical limit. Downtown Boston and Diamond City reach 10,000-12,000. With
+precombines/PreVis broken, which most world-editing mods do, dense cells pass
+15,000. At that point the CPU, not the GPU, sets the frame rate. Shadow
+cascades multiply the count again.
+
+Nvidium solved the same problem in Minecraft. Terrain is kept resident on the
+GPU, the GPU decides what is visible, and the GPU generates its own draw
+commands. This plugin applies the same idea within Fallout 4's Direct3D 11
+renderer.
+
+## How it works
+
+1. **Observe.** Vtable hooks on `BSLightingShaderProperty`,
+   `BSLightingShader`/`BSUtilityShader` and `BSShaderAccumulator` (plus COM
+   hooks on the D3D11 device, context and swap chain) watch which objects the
+   engine registers for each view and which D3D11 buffers it draws them from.
+2. **Merge.** Some objects are plain, static, opaque `BSTriShape`s. Those that
+   share a material (the engine's own `CanMerge` precombine test), a vertex
+   format and a 4096-unit grid cell are copied on the GPU into one batch. Each
+   batch is stored in the local space of one member, the *anchor*. Positions
+   are widened to 32-bit floats. This is a runtime precombine that never
+   touches plugin files and never breaks PreVis.
+3. **Route.** For each view (main camera, each shadow cascade), the first
+   batch member the engine registers takes the anchor's render passes, and the
+   rest report no passes. Every member registered for the view goes into that
+   view's visibility list.
+4. **Cull on the GPU.** The anchor's draw is reached with the engine's own
+   shaders, materials and states. At that point one compute dispatch per view
+   culls the listed members against a hierarchical-Z pyramid of the previous
+   frame's depth. It then writes indirect draw arguments.
+5. **Draw indirectly.** The anchor's `DrawIndexed` is replaced by one
+   `DrawIndexedInstancedIndirect` for the whole batch, using index compaction
+   (any GPU). On NVIDIA, `NvAPI_D3D11_MultiDrawIndexedInstancedIndirect` draws
+   per-member records directly.
+
+Thousands of per-object engine passes become one indirect draw per batch per
+view. The objects the engine culls stay culled, and the GPU adds occlusion
+culling that Fallout 4 lacks wherever PreVis is broken.
+
+Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
+[docs/NVIDIUM_COMPARISON.md](docs/NVIDIUM_COMPARISON.md).
+
+## Requirements
+
+- Fallout 4 OG 1.10.163, NG 1.10.984 or AE 1.11.x with the matching
+  [F4SE](https://f4se.silverlock.org/)
+- The CommonLibF4RD runtime database: `Data/F4SE/Plugins/f4rd-runtime.bin`,
+  distributed with CommonLibF4RD and not with this repository
+- A Direct3D 11.0 GPU. NVIDIA drivers additionally enable the NVAPI
+  multi-draw path.
+
+## Install
+
+```text
+Data/
+└─ F4SE/
+   └─ Plugins/
+      ├─ GPUWorldPipeline.dll
+      ├─ GPUWorldPipeline.ini      (optional; defaults are built in)
+      └─ f4rd-runtime.bin          (CommonLibF4RD runtime database)
+```
+
+The log is written to `Documents/My Games/Fallout4/F4SE/GPUWorldPipeline.log`.
+**F10** toggles batching in game for A/B comparisons.
+
+## Build
+
+Requirements: Visual Studio 2022 (Desktop development with C++), CMake 3.21+,
+and vcpkg with `VCPKG_ROOT` set.
+
+```text
+git clone --recursive https://github.com/AtomicTEM/Fallout-4-GPU-Pipeline.git
+cd Fallout-4-GPU-Pipeline
+cmake --preset vs2022-windows-vcpkg
+cmake --build --preset vs2022-release
+```
+
+Output: `build/vs2022/Release/GPUWorldPipeline.dll`. Pass `-DCOPY_BUILD=ON`
+with `Fallout4Path` set to copy the DLL and INI into the game folder.
+
+The HLSL in `shaders/` is embedded into the DLL and compiled at start-up by
+Windows' `d3dcompiler_47.dll` (`cs_5_0`). `[Debug] sShaderDirectory` loads
+shader files from disk instead, for iteration without rebuilding.
+
+### Tests
+
+`tests/GpuTests.cpp` runs the real shaders and GPU modules on a Direct3D 11
+device without the game. It checks vertex/index merging, culling, compaction,
+multi-draw records, Hi-Z construction and occlusion decisions.
+
+- Windows: configure with `-DBUILD_GPU_TESTS=ON` and run `GpuTests.exe` (it
+  falls back to WARP when no GPU is available).
+- Linux: `tools/run-tests-wine.sh` builds with MinGW-w64 and runs under Wine
+  on Mesa's llvmpipe.
+
+CI (`.github/workflows/build.yml`) builds the DLL with MSVC and runs the tests
+on both platforms.
+
+## Configuration
+
+Every option is documented in
+[`dist/Data/F4SE/Plugins/GPUWorldPipeline.ini`](dist/Data/F4SE/Plugins/GPUWorldPipeline.ini).
+These are the ones that matter most:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `[General] iMode` | `1` | `0` only observes and logs; `1` batches |
+| `[General] iToggleKey` | `121` (F10) | Toggles batching in game |
+| `[Batching] bBatchMainView` / `bBatchShadows` | `1` / `1` | Which views are batched |
+| `[Culling] bOcclusionCulling` | `1` | Previous-frame Hi-Z occlusion for the main view |
+| `[Culling] iIndirectMode` | `0` | Auto, compaction, NVAPI multi-draw, or draw loop |
+| `[Memory] iArenaVertexMB` / `iArenaIndexMB` | `512` / `192` | VRAM budget for merged geometry |
+
+## What is batched, and what is not
+
+Batched:
+
+- Static `BSTriShape` objects that use `BSLightingShaderProperty`
+- Opaque or alpha-tested objects
+- Objects that stay still for 60 frames and are drawn in the main view
+
+Not batched; these render exactly as vanilla:
+
+- Skinned or animated geometry (actors, creatures)
+- Alpha-blended geometry
+- Landscape and LOD
+- Effects and particles
+- `BSMultiIndexTriShape`/`BSCombinedTriShape` (existing precombines)
+- Objects that are fading, moving or being edited in workshop mode
+- Views whose render mode is rare (local map, VATS masks, and so on)
+
+## Credits
+
+- [CommonLibF4RD](https://github.com/Zzyxz/CommonLibF4RD) and its
+  [example plugin](https://github.com/Zzyxz/CommonLibF4RD-ExamplePlugin): the
+  project template, runtime-aware relocations, and RE types
+- [libxse/commonlibf4](https://github.com/libxse/commonlibf4) and
+  [F4SE](https://github.com/ianpatt/f4se): engine structure layouts used as
+  cross-references
+- [Nvidium](https://github.com/MCRcortex/nvidium) and its
+  [EXT_mesh_shader port](https://github.com/drouarb/nvidium/tree/EXT_mesh_shader):
+  the design this plugin follows. No code was copied.
+- The Fallout 4 performance research notes, which describe the bottleneck being
+  addressed: draw-call limits, PVC trade-offs and CPU sensitivity

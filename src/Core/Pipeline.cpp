@@ -497,6 +497,16 @@ namespace GWP
 			}
 		}
 
+		// Confirm the NiTransform convention (worldBound == world * modelBound)
+		// on a sample of the objects the engine draws.
+		if (!_calibration.Complete() && (++tls.sampleCounter & 7) == 0) {
+			const auto* const object = Engine::AsAVObject(geometry);
+			const auto& model = Engine::Field<RE::NiBound>(geometry, Engine::Offsets::kGeometryModelBound);
+			if (HasRotation(object->world) && std::abs(model.center.x) + std::abs(model.center.y) + std::abs(model.center.z) > 4.0F) {
+				_calibration.SampleTransform(TransformMatches(object->world, model, object->worldBound, false), TransformMatches(object->world, model, object->worldBound, true));
+			}
+		}
+
 		// Otherwise capture the engine's buffers for objects waiting to be merged.
 		if (batchMode && tls.passShader == ShaderKind::kLighting) {
 			auto* const record = _registry.Find(geometry);
@@ -601,14 +611,6 @@ namespace GWP
 			_calibration.SampleUnknownLayout();
 			reject(ObjectState::kRejected);
 			return;
-		}
-
-		// Confirm the NiTransform convention: worldBound == world * modelBound.
-		const auto& world = Engine::AsAVObject(a_record.geometry)->world;
-		const auto& model = Engine::Field<RE::NiBound>(a_record.geometry, Engine::Offsets::kGeometryModelBound);
-		const auto& worldBound = Engine::AsAVObject(a_record.geometry)->worldBound;
-		if (HasRotation(world) && std::abs(model.center.x) + std::abs(model.center.y) + std::abs(model.center.z) > 4.0F) {
-			_calibration.SampleTransform(TransformMatches(world, model, worldBound, false), TransformMatches(world, model, worldBound, true));
 		}
 
 		a_record.capture = std::move(capture);

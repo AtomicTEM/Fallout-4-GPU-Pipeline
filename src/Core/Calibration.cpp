@@ -191,7 +191,7 @@ namespace GWP
 			_batchingAllowed.store(allowed, std::memory_order_release);
 			if (allowed) {
 				_complete = true;
-				logger::info("calibration: batching enabled (main view: {}, transforms transposed: {})", mainView, _transposed);
+				logger::info("calibration: all checks passed, batching allowed (main view: {}, transforms transposed: {})", mainView, _transposed);
 				if (!mainView) {
 					logger::warn("calibration: depth pre-pass requests could not be paired with registrations ({} unpaired of {}), only shadow views are batched", depthUnpaired, depthNonNull);
 				}
