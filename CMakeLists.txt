@@ -19,7 +19,7 @@ set_from_environment(VCPKG_ROOT)
 
 if (DEFINED VCPKG_ROOT)
 	set(CMAKE_TOOLCHAIN_FILE "${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" CACHE STRING "")
-	set(VCPKG_TARGET_TRIPLET "x64-windows-static-md" CACHE STRING "")
+	set(VCPKG_TARGET_TRIPLET "x64-windows-static" CACHE STRING "")
 else ()
 	message(
 		WARNING
@@ -27,8 +27,12 @@ else ()
 	)
 endif ()
 
-set(Boost_USE_STATIC_RUNTIME OFF CACHE BOOL "")
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL" CACHE STRING "")
+# The C/C++ runtime is linked statically. A /MD build of the current MSVC STL
+# crashes on its first std::mutex lock when the process has loaded an
+# msvcp140.dll older than 14.40, which Proton prefixes and older Windows
+# installs can have.
+set(Boost_USE_STATIC_RUNTIME ON CACHE BOOL "")
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "")
 
 # ---- Project ----
 

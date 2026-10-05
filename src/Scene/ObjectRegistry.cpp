@@ -49,6 +49,8 @@ namespace GWP
 		record->firstSeenFrame = a_frame;
 		record->stableSinceFrame = a_frame;
 		record->lastSeenFrame.store(a_frame, std::memory_order_relaxed);
+		record->startedViewFrame.store(0, std::memory_order_relaxed);
+		record->otherQueueFrame.store(0, std::memory_order_relaxed);
 		record->state.store(ObjectState::kTracking, std::memory_order_release);
 
 		shard.map.emplace(a_geometry, record);

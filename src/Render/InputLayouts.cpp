@@ -113,17 +113,17 @@ namespace GWP
 			return a_source;
 		}
 
-		{
-			std::scoped_lock lock{ _variantLock };
-			const auto it = _variants.find({ a_source, a_shift });
-			if (it != _variants.end()) {
-				return it->second.Get();
-			}
-		}
-
 		const auto source = Find(a_source);
 		if (!source || source->bytecode.empty()) {
 			return nullptr;
+		}
+
+		{
+			std::scoped_lock lock{ _variantLock };
+			const auto it = _variants.find({ a_source, a_shift });
+			if (it != _variants.end() && it->second.source == source) {
+				return it->second.layout.Get();
+			}
 		}
 
 		std::vector<D3D11_INPUT_ELEMENT_DESC> descs;
@@ -166,10 +166,10 @@ namespace GWP
 
 		std::scoped_lock lock{ _variantLock };
 		auto& slot = _variants[{ a_source, a_shift }];
-		if (!slot) {
-			slot = variant;
+		if (!slot.layout || slot.source != source) {
+			slot = { std::move(variant), source };
 		}
-		return slot.Get();
+		return slot.layout.Get();
 	}
 
 	std::size_t InputLayouts::Count() const

@@ -31,6 +31,18 @@ namespace GWP
 			       std::abs(out[2] - a_worldBound.center.z) <= tolerance;
 		}
 
+		// RendererData::GetSingleton() resolves its ID through CommonLibF4RD's
+		// fatal path, which would end the game; resolve it softly instead.
+		[[nodiscard]] RE::BSGraphics::RendererData* FindRendererData()
+		{
+			const auto result = REL::IDDatabase::get().resolve(REL::ID(1235449, 2704429));
+			if (!result) {
+				logger::error("pipeline: renderer data unresolved: {} {}", REL::id_resolve_status_text(result.status), result.note);
+				return nullptr;
+			}
+			return *reinterpret_cast<RE::BSGraphics::RendererData**>(REL::Module::get().base() + *result.rva);
+		}
+
 		[[nodiscard]] bool HasRotation(const RE::NiTransform& a_world) noexcept
 		{
 			const auto& r = a_world.rotate.entry;
@@ -70,7 +82,7 @@ namespace GWP
 		}
 
 		const auto& settings = Settings::Get();
-		auto* const renderer = RE::BSGraphics::RendererData::GetSingleton();
+		auto* const renderer = FindRendererData();
 		if (!renderer || !renderer->device || !renderer->context) {
 			logger::error("pipeline: renderer data is not available");
 			return;
@@ -100,6 +112,9 @@ namespace GWP
 			} else if (!_shaders.Initialize(_device) || !_buckets.Initialize(_device, _shaders) ||
 					   !_batches.Initialize(_device, _shaders, _buckets) || !_hiz.Initialize(_device, _shaders)) {
 				logger::error("pipeline: GPU resources could not be created; running in observe mode");
+				_buckets.Shutdown();
+				_batches.Release();
+				_hiz.Release();
 				Settings::Get().mode = PipelineMode::kObserve;
 			}
 		}
@@ -238,6 +253,12 @@ namespace GWP
 			return CallNormal(a_original, a_property, a_geometry, a_mode, a_accumulator);
 		}
 		record->lastSeenFrame.store(frame, std::memory_order_relaxed);
+
+		// Only registrations in a view whose StartAccumulating was seen are ever
+		// batched; calibration uses this to judge where the passes are drawn.
+		const auto* const queue = _views.Find(a_accumulator);
+		const bool started = queue && queue->epoch.load(std::memory_order_relaxed) != 0;
+		(started ? record->startedViewFrame : record->otherQueueFrame).store(frame, std::memory_order_relaxed);
 
 		const auto state = record->state.load(std::memory_order_acquire);
 		if (state == ObjectState::kTracking) {
@@ -393,6 +414,7 @@ namespace GWP
 
 	void Pipeline::OnFinishBegin(RE::BSShaderAccumulator* a_accumulator, FinishKind a_kind)
 	{
+		_activeFinishes.fetch_add(1, std::memory_order_relaxed);
 		auto& tls = TLS();
 		if (tls.depth < tls.views.size()) {
 			auto* const view = Ready() ? _views.Find(a_accumulator) : nullptr;
@@ -410,6 +432,7 @@ namespace GWP
 		if (tls.depth == 0) {
 			return;
 		}
+		_activeFinishes.fetch_sub(1, std::memory_order_relaxed);
 		--tls.depth;
 		if (tls.depth >= tls.views.size()) {
 			return;
@@ -451,7 +474,22 @@ namespace GWP
 		tls.passGeometry = geometry;
 
 		const bool inside = tls.depth > 0 && tls.depth <= tls.views.size() && tls.views[tls.depth - 1].view;
-		_calibration.SampleSetup(inside);
+		const bool renderThread = std::this_thread::get_id() == _renderThread;
+		if (inside) {
+			_calibration.SampleSetup(SetupPlace::kInside, renderThread, false);
+		} else {
+			// Passes drawn outside a started view only matter for objects that
+			// were queued in one (this frame or, if the frame turned meanwhile,
+			// the previous one).
+			const auto frame = _frame.load(std::memory_order_relaxed);
+			const auto recent = [frame](std::uint32_t a_stamp) { return a_stamp != 0 && a_stamp + 1 >= frame; };
+			auto place = SetupPlace::kOutsideOther;
+			if (const auto* const record = _registry.Find(geometry); record && recent(record->startedViewFrame.load(std::memory_order_relaxed))) {
+				place = recent(record->otherQueueFrame.load(std::memory_order_relaxed)) ? SetupPlace::kOutsideAmbiguous : SetupPlace::kOutsideBatchable;
+			}
+			const bool finishElsewhere = _activeFinishes.load(std::memory_order_relaxed) > tls.depth;
+			_calibration.SampleSetup(place, renderThread, finishElsewhere);
+		}
 		if (inside) {
 			auto* const view = tls.views[tls.depth - 1].view;
 			if (a_kind == ShaderKind::kLighting) {

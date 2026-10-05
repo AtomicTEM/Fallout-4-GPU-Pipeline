@@ -33,6 +33,19 @@ namespace GWP
 		_passSamples.fetch_add(1, std::memory_order_relaxed);
 	}
 
+	void Calibration::SampleSetup(SetupPlace a_place, bool a_renderThread, bool a_finishElsewhere) noexcept
+	{
+		_setups[static_cast<std::size_t>(a_place)].fetch_add(1, std::memory_order_relaxed);
+		if (a_place == SetupPlace::kOutsideBatchable) {
+			if (!a_renderThread) {
+				_batchableOnWorker.fetch_add(1, std::memory_order_relaxed);
+			}
+			if (a_finishElsewhere) {
+				_batchableDuringFinish.fetch_add(1, std::memory_order_relaxed);
+			}
+		}
+	}
+
 	void Calibration::SampleRenderMode(PassKind a_kind, std::uint32_t a_mode) noexcept
 	{
 		_modes[static_cast<std::size_t>(a_kind)][std::min(a_mode, kModeBuckets - 1)].fetch_add(1, std::memory_order_relaxed);
@@ -142,25 +155,39 @@ namespace GWP
 			}
 		}
 
-		const auto inside = _setupInsideView.load(std::memory_order_relaxed);
-		const auto outside = _setupOutsideView.load(std::memory_order_relaxed);
+		// Passes of objects that were never queued in a started view are never
+		// batched, so only passes of objects that were can block batching.
+		const auto inside = _setups[static_cast<std::size_t>(SetupPlace::kInside)].load(std::memory_order_relaxed);
+		const auto outside = _setups[static_cast<std::size_t>(SetupPlace::kOutsideBatchable)].load(std::memory_order_relaxed);
 		const auto observed = _observedDraws.load(std::memory_order_relaxed);
 		const auto missed = _missedDraws.load(std::memory_order_relaxed);
 
+		// key: the kind of reason, which decides when it is logged again
+		std::string_view key;
 		std::string reason;
 		if (_passGeometryOffset.load(std::memory_order_relaxed) < 0) {
+			key = "layout";
 			reason = "learning BSRenderPass layout";
 		} else if (_framesObserved < settings.calibrationMinFrames) {
+			key = "frames";
 			reason = "observing frames";
 		} else if (inside + outside < minSamples || observed + missed < minSamples) {
+			key = "waiting";
 			reason = "waiting for world geometry to be drawn";
 		} else if (outside * 1000 > inside + outside) {
-			reason = fmt::format("{} of {} lighting/utility passes were rendered outside BSShaderAccumulator::FinishAccumulating", outside, inside + outside);
+			key = "outside";
+			reason = fmt::format(
+				"{} of {} passes of batchable objects were rendered outside BSShaderAccumulator::FinishAccumulating "
+				"({} on worker threads, {} while another thread was inside FinishAccumulating)",
+				outside, inside + outside, _batchableOnWorker.load(std::memory_order_relaxed), _batchableDuringFinish.load(std::memory_order_relaxed));
 		} else if (missed * 1000 > observed + missed) {
+			key = "missed";
 			reason = fmt::format("{} of {} geometry passes issued no draw visible to the Direct3D hook", missed, observed + missed);
 		} else if (!transformKnown) {
+			key = "transform";
 			reason = transformSamples < 64 ? "waiting for transform samples" : "NiTransform convention could not be confirmed";
 		} else if (!D3DHooks::DeviceHooked()) {
+			key = "device";
 			reason = "Direct3D device hooks are not installed";
 		}
 
@@ -180,12 +207,17 @@ namespace GWP
 		}
 
 		const bool changed = allowed != _batchingAllowed.load(std::memory_order_relaxed) || mainView != _mainViewAllowed.load(std::memory_order_relaxed);
-		if (reason != _blockReason) {
-			if (!reason.empty()) {
-				logger::info("calibration: batching on hold: {}", reason);
+		// Log a new kind of reason at once; the same one (with updated counts)
+		// at most every 30 seconds.
+		const auto now = std::chrono::steady_clock::now();
+		if (!reason.empty() && (key != _blockKey || now - _blockLogged >= 30s)) {
+			logger::info("calibration: batching on hold: {}", reason);
+			if (key == "outside"sv) {
+				LogSummary();
 			}
-			_blockReason = reason;
+			_blockLogged = now;
 		}
+		_blockKey = key;
 		if (changed) {
 			_mainViewAllowed.store(mainView, std::memory_order_release);
 			_batchingAllowed.store(allowed, std::memory_order_release);
@@ -203,8 +235,9 @@ namespace GWP
 
 	void Calibration::LogSummary() const
 	{
-		logger::info("calibration: pass offset {} | setups inside/outside view {}/{} | draws observed/missed {}/{}",
-			_passGeometryOffset.load(), _setupInsideView.load(), _setupOutsideView.load(), _observedDraws.load(), _missedDraws.load());
+		logger::info("calibration: pass offset {} | setups inside view {}, outside: batchable {} ({} on worker threads, {} during another thread's FinishAccumulating), ambiguous {}, never batched {} | draws observed/missed {}/{}",
+			_passGeometryOffset.load(), _setups[0].load(), _setups[1].load(), _batchableOnWorker.load(), _batchableDuringFinish.load(), _setups[2].load(), _setups[3].load(),
+			_observedDraws.load(), _missedDraws.load());
 		logger::info("calibration: depth passes paired/unpaired/non-null {}/{}/{} | transforms row/transposed {}/{} of {} | unknown layouts {} | registrations before start {}",
 			_depthPaired.load(), _depthUnpaired.load(), _depthNonNull.load(), _transformRowMajor.load(), _transformTransposed.load(), _transformSamples.load(),
 			_unknownLayouts.load(), _registrationBeforeStart.load());

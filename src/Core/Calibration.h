@@ -9,6 +9,16 @@ namespace GWP
 		kCount = 2
 	};
 
+	// Where a lighting/utility pass of a batchable object was set up.
+	enum class SetupPlace : std::uint32_t
+	{
+		kInside,            // inside the FinishAccumulating of a started view
+		kOutsideBatchable,  // outside, and the object was queued only in started views
+		kOutsideAmbiguous,  // outside, and the object was also queued in an unhooked queue
+		kOutsideOther,      // outside, and never queued in a started view: never batched
+		kCount
+	};
+
 	// Runtime verification of every renderer assumption the batching path
 	// relies on. Batching stays off until each check has enough samples and
 	// passes; a later violation switches it off again. Nothing here uses
@@ -27,7 +37,9 @@ namespace GWP
 
 		void SampleRenderMode(PassKind a_kind, std::uint32_t a_mode) noexcept;
 
-		void SampleSetup(bool a_insideView) noexcept { (a_insideView ? _setupInsideView : _setupOutsideView).fetch_add(1, std::memory_order_relaxed); }
+		// a_renderThread: set up on the render thread; a_finishElsewhere: while
+		// another thread was inside a FinishAccumulating.
+		void SampleSetup(SetupPlace a_place, bool a_renderThread, bool a_finishElsewhere) noexcept;
 		void SampleMissedDraw() noexcept { _missedDraws.fetch_add(1, std::memory_order_relaxed); }
 		void SampleObservedDraw() noexcept { _observedDraws.fetch_add(1, std::memory_order_relaxed); }
 		void SampleDepthPass(bool a_paired, bool a_nonNull) noexcept;
@@ -72,8 +84,9 @@ namespace GWP
 		std::array<std::array<std::atomic<std::uint32_t>, kModeBuckets>, static_cast<std::size_t>(PassKind::kCount)> _modes{};
 		std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(PassKind::kCount)> _allowedModes{};
 
-		std::atomic<std::uint32_t> _setupInsideView{ 0 };
-		std::atomic<std::uint32_t> _setupOutsideView{ 0 };
+		std::array<std::atomic<std::uint32_t>, static_cast<std::size_t>(SetupPlace::kCount)> _setups{};
+		std::atomic<std::uint32_t> _batchableOnWorker{ 0 };
+		std::atomic<std::uint32_t> _batchableDuringFinish{ 0 };
 		std::atomic<std::uint32_t> _missedDraws{ 0 };
 		std::atomic<std::uint32_t> _observedDraws{ 0 };
 		std::atomic<std::uint32_t> _depthPaired{ 0 };
@@ -94,6 +107,7 @@ namespace GWP
 		bool _revoked{ false };
 		std::uint32_t _framesObserved{ 0 };
 		std::uint32_t _lastAnchorOutsideView{ 0 };
-		std::string _blockReason;
+		std::string_view _blockKey;
+		std::chrono::steady_clock::time_point _blockLogged{};
 	};
 }

@@ -81,6 +81,20 @@ namespace GWP
 		return true;
 	}
 
+	void BatchRenderer::Release()
+	{
+		_compact.Reset();
+		_multiDraw.Reset();
+		_constants.Reset();
+		_work.Destroy();
+		_args.Destroy();
+		_ring.Destroy();
+		_argsCapacity = 0;
+		_argsCursor = 0;
+		_ringCapacity = 0;
+		_ringCursor = 0;
+	}
+
 	void BatchRenderer::BeginFrame()
 	{
 		// Cursors wrap instead of resetting: GPU commands on one context run in

@@ -1,6 +1,8 @@
 set(SOURCES
 	src/Core/Calibration.cpp
 	src/Core/Calibration.h
+	src/Core/Guard.cpp
+	src/Core/Guard.h
 	src/Core/Pipeline.cpp
 	src/Core/Pipeline.h
 	src/Engine/EngineHooks.cpp

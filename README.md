@@ -63,8 +63,15 @@ Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
 
 - Fallout 4 OG 1.10.163, NG 1.10.984 or AE 1.11.x with the matching
   [F4SE](https://f4se.silverlock.org/)
-- The CommonLibF4RD runtime database: `Data/F4SE/Plugins/f4rd-runtime.bin`,
-  distributed with CommonLibF4RD and not with this repository
+- An ID database, which is not included:
+  - the CommonLibF4RD [Runtime Database](https://www.nexusmods.com/fallout4/mods/108394)
+    at `Data/F4SE/Plugins/f4rd-runtime.bin` (you already have it if you use
+    other `…RD` plugins), or
+  - an Address Library for F4SE Plugins file matching your game version
+    (`Data/F4SE/Plugins/version-<version>.bin`).
+
+  Without one, the plugin logs where to get it and disables itself. The game
+  keeps running.
 - A Direct3D 11.0 GPU. NVIDIA drivers additionally enable the NVAPI
   multi-draw path.
 
@@ -100,8 +107,8 @@ Every package is checked on Linux by the **Verify package** job after it is
 built. A run is green, and a release is published, only if that check passes,
 so take artifacts from successful runs. `tools/check-package.sh` verifies the
 folder layout, that the DLL is 64-bit, its F4SE exports, that it imports only
-Windows system DLLs and the Visual C++ runtime, and that it embeds the
-precompiled shaders. Run it on an extracted package to check it yourself. It
+Windows system DLLs (the C/C++ runtime is linked statically), and that it
+embeds the precompiled shaders. Run it on an extracted package to check it yourself. It
 needs GNU binutils' `objdump`.
 
 ## Install
@@ -122,8 +129,13 @@ Data/
    └─ Plugins/
       ├─ GPUWorldPipeline.dll
       ├─ GPUWorldPipeline.ini      (optional; defaults are built in)
+      ├─ GPUWorldPipeline.pdb      (optional; debug symbols for crash logs)
       └─ f4rd-runtime.bin          (CommonLibF4RD runtime database, not included)
 ```
+
+The PDB comes in the separate `-pdb` download and is not needed to play.
+Placed next to the DLL, it lets crash loggers name the plugin's functions in
+crash logs.
 
 The log is written to `Documents/My Games/Fallout4/F4SE/GPUWorldPipeline.log`.
 **F10** toggles batching in game for A/B comparisons.

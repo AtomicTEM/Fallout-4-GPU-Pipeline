@@ -71,7 +71,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ${{ steps.vcpkg.outputs.cache }}
-          key: vcpkg-${{ runner.os }}-${{ steps.vcpkg.outputs.commit }}-${{ hashFiles('vcpkg.json') }}
+          key: vcpkg-${{ runner.os }}-${{ steps.vcpkg.outputs.commit }}-${{ hashFiles('vcpkg.json', 'CMakePresets.json') }}
           restore-keys: |
             vcpkg-${{ runner.os }}-${{ steps.vcpkg.outputs.commit }}-
             vcpkg-${{ runner.os }}-
@@ -196,8 +196,8 @@ jobs:
             exit 0
           fi
           notes="- **Install:** extract \`$PACKAGE.zip\` into \`Fallout 4/Data\`, or install it with a mod manager.
-          - **Requires:** F4SE and the CommonLibF4RD runtime database (\`Data/F4SE/Plugins/f4rd-runtime.bin\`), which is distributed separately.
-          - \`$PACKAGE-pdb.zip\` holds debug symbols for crash reports. It is not needed to play."
+          - **Requires:** F4SE and an ID database: the CommonLibF4RD [Runtime Database](https://www.nexusmods.com/fallout4/mods/108394) (\`Data/F4SE/Plugins/f4rd-runtime.bin\`) or a matching Address Library for F4SE Plugins file.
+          - \`$PACKAGE-pdb.zip\` holds debug symbols. It is not needed to play; put the PDB next to the DLL for readable crash logs."
           flags=(--verify-tag --title "GPU World Pipeline $TAG" --notes "$notes" --generate-notes)
           if [[ "$TAG" == *-* ]]; then
             flags+=(--prerelease)

@@ -208,7 +208,7 @@ Batching starts only after all of these hold over `iMinFrames`/`iMinSamples`:
 | Check | Why |
 | --- | --- |
 | Learn where `BSRenderPass` keeps its geometry pointer: the only qword offset that equals the geometry in 100% of passes returned by `GetRenderPasses` | The layout is not in any public header; it is learned, then continuously re-verified |
-| ≥99.9% of passes are rendered inside `FinishAccumulating*` | The view stack identifies which accumulation a draw belongs to |
+| ≥99.9% of the passes of objects queued in a started view are rendered inside `FinishAccumulating*` (objects only ever queued elsewhere are never batched and do not count) | The view stack identifies which accumulation a draw belongs to |
 | ≥99.9% of `SetupGeometry` calls are followed by a draw the D3D hook sees | Draws on unhooked (deferred) contexts would lose members |
 | `worldBound == world * modelBound` confirms the `NiTransform` convention (or its transpose) | Merged vertices must match the engine's math |
 | Depth-pass requests pair with the preceding registration | Otherwise only shadow views are batched, to avoid depth pre-pass mismatches |

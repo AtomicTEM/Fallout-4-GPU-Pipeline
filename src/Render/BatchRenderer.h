@@ -34,6 +34,7 @@ namespace GWP
 	{
 	public:
 		bool Initialize(ID3D11Device* a_device, ShaderLibrary& a_shaders, BucketManager& a_buckets);
+		void Release();
 
 		void BeginFrame();
 

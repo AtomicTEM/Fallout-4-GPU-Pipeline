@@ -231,11 +231,12 @@ namespace GWP
 
 		_srv.Reset();
 		if (_bindFlags & D3D11_BIND_SHADER_RESOURCE) {
+			// DXGI_FORMAT_UNKNOWN is only valid for structured buffers.
 			D3D11_SHADER_RESOURCE_VIEW_DESC srv{};
-			srv.Format = DXGI_FORMAT_UNKNOWN;
+			srv.Format = _stride ? DXGI_FORMAT_UNKNOWN : DXGI_FORMAT_R32_UINT;
 			srv.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
 			srv.Buffer.FirstElement = 0;
-			srv.Buffer.NumElements = a_bytes / std::max<UINT>(_stride, 1);
+			srv.Buffer.NumElements = a_bytes / (_stride ? _stride : 4);
 			if (FAILED(_device->CreateShaderResourceView(_buffer.Get(), &srv, _srv.GetAddressOf()))) {
 				logger::error("dynamic: failed to create SRV for {}", _name);
 				return false;
@@ -244,6 +245,13 @@ namespace GWP
 
 		_size = a_bytes;
 		return true;
+	}
+
+	void DynamicBuffer::Destroy()
+	{
+		_srv.Reset();
+		_buffer.Reset();
+		_size = 0;
 	}
 
 	bool DynamicBuffer::Upload(ID3D11DeviceContext* a_context, const void* a_data, std::uint32_t a_bytes)

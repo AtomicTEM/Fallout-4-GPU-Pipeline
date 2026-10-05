@@ -1,20 +1,30 @@
 #include "Engine/EngineHooks.h"
 
+#include "Core/Guard.h"
 #include "Core/Pipeline.h"
 
 namespace GWP::EngineHooks
 {
 	namespace
 	{
+		[[nodiscard]] bool InRData(std::uintptr_t a_address, std::size_t a_size) noexcept
+		{
+			const auto rdata = REL::Module::get().segment(REL::Segment::rdata);
+			return a_address >= rdata.address() && a_address <= rdata.address() + rdata.size() - a_size;
+		}
+
 		// MSVC RTTICompleteObjectLocator: the primary vtable of a class has
-		// offset 0; secondary vtables (other base subobjects) do not.
+		// offset 0; secondary vtables (other base subobjects) do not. Vtables
+		// and locators live in .rdata; an address from a wrong or damaged ID
+		// database is rejected instead of dereferenced.
 		[[nodiscard]] bool IsPrimaryVTable(std::uintptr_t a_vtable) noexcept
 		{
-			if (!a_vtable) {
+			constexpr auto kPointer = sizeof(std::uintptr_t);
+			if (!a_vtable || a_vtable % kPointer != 0 || !InRData(a_vtable - kPointer, kPointer)) {
 				return false;
 			}
-			const auto locator = *reinterpret_cast<const std::uintptr_t*>(a_vtable - sizeof(std::uintptr_t));
-			if (!locator) {
+			const auto locator = *reinterpret_cast<const std::uintptr_t*>(a_vtable - kPointer);
+			if (locator % alignof(std::uint32_t) != 0 || !InRData(locator, 2 * sizeof(std::uint32_t))) {
 				return false;
 			}
 			const auto* const fields = reinterpret_cast<const std::uint32_t*>(locator);
@@ -56,17 +66,23 @@ namespace GWP::EngineHooks
 		{
 			static RenderPassArray* GetRenderPasses(RE::BSShaderProperty* a_this, RE::BSGeometry* a_geometry, std::uint32_t a_mode, RE::BSShaderAccumulator* a_accumulator)
 			{
-				return Pipeline::Get().OnGetRenderPasses(PassKind::kMain, getRenderPasses, a_this, a_geometry, a_mode, a_accumulator);
+				return Guarded(
+					"GetRenderPasses", [&] { return getRenderPasses(a_this, a_geometry, a_mode, a_accumulator); },
+					[&] { return Pipeline::Get().OnGetRenderPasses(PassKind::kMain, getRenderPasses, a_this, a_geometry, a_mode, a_accumulator); });
 			}
 
 			static RenderPassArray* GetRenderPassesShadowMapOrMask(RE::BSShaderProperty* a_this, RE::BSGeometry* a_geometry, std::uint32_t a_mode, RE::BSShaderAccumulator* a_accumulator)
 			{
-				return Pipeline::Get().OnGetRenderPasses(PassKind::kShadow, getRenderPassesShadowMapOrMask, a_this, a_geometry, a_mode, a_accumulator);
+				return Guarded(
+					"GetRenderPassesShadowMapOrMask", [&] { return getRenderPassesShadowMapOrMask(a_this, a_geometry, a_mode, a_accumulator); },
+					[&] { return Pipeline::Get().OnGetRenderPasses(PassKind::kShadow, getRenderPassesShadowMapOrMask, a_this, a_geometry, a_mode, a_accumulator); });
 			}
 
 			static RE::BSRenderPass* GetRenderDepthPass(RE::BSShaderProperty* a_this, RE::BSGeometry* a_geometry)
 			{
-				return Pipeline::Get().OnGetRenderDepthPass(getRenderDepthPass, a_this, a_geometry);
+				return Guarded(
+					"GetRenderDepthPass", [&] { return getRenderDepthPass(a_this, a_geometry); },
+					[&] { return Pipeline::Get().OnGetRenderDepthPass(getRenderDepthPass, a_this, a_geometry); });
 			}
 
 			static inline GetRenderPasses_t getRenderPasses{ nullptr };
@@ -82,12 +98,12 @@ namespace GWP::EngineHooks
 			static void SetupGeometry(RE::BSShader* a_this, RE::BSRenderPass* a_pass)
 			{
 				setupGeometry(a_this, a_pass);
-				Pipeline::Get().OnSetupGeometry(Kind, a_pass);
+				Guarded("SetupGeometry", [&] { Pipeline::Get().OnSetupGeometry(Kind, a_pass); });
 			}
 
 			static void RestoreGeometry(RE::BSShader* a_this, RE::BSRenderPass* a_pass)
 			{
-				Pipeline::Get().OnRestoreGeometry(Kind, a_pass);
+				Guarded("RestoreGeometry", [&] { Pipeline::Get().OnRestoreGeometry(Kind, a_pass); });
 				restoreGeometry(a_this, a_pass);
 			}
 
@@ -102,17 +118,16 @@ namespace GWP::EngineHooks
 
 			static void StartAccumulating(RE::BSShaderAccumulator* a_this, const RE::NiCamera* a_camera)
 			{
-				Pipeline::Get().OnStartAccumulating(a_this);
+				Guarded("StartAccumulating", [&] { Pipeline::Get().OnStartAccumulating(a_this); });
 				start(a_this, a_camera);
 			}
 
 			template <FinishKind Kind>
 			static void Finish(RE::BSShaderAccumulator* a_this)
 			{
-				auto& pipeline = Pipeline::Get();
-				pipeline.OnFinishBegin(a_this, Kind);
+				Guarded("FinishAccumulating (begin)", [&] { Pipeline::Get().OnFinishBegin(a_this, Kind); });
 				finish[static_cast<std::size_t>(Kind)](a_this);
-				pipeline.OnFinishEnd(a_this, Kind);
+				Guarded("FinishAccumulating (end)", [&] { Pipeline::Get().OnFinishEnd(a_this, Kind); });
 			}
 
 			static inline Start_t start{ nullptr };

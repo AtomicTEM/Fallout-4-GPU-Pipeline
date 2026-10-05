@@ -68,8 +68,18 @@ namespace GWP
 			}
 		};
 
+		// The engine's layout pointers are not reference-counted here, so a
+		// released layout's address can come back as a different layout. Each
+		// variant remembers the description it was built from and is rebuilt
+		// when the pointer now describes something else.
+		struct Variant
+		{
+			Microsoft::WRL::ComPtr<ID3D11InputLayout> layout;
+			std::shared_ptr<const Layout> source;
+		};
+
 		std::mutex _variantLock;
-		std::unordered_map<VariantKey, Microsoft::WRL::ComPtr<ID3D11InputLayout>, VariantKeyHash> _variants;
+		std::unordered_map<VariantKey, Variant, VariantKeyHash> _variants;
 	};
 
 	[[nodiscard]] std::uint32_t FormatByteSize(DXGI_FORMAT a_format) noexcept;

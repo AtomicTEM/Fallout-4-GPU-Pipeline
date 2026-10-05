@@ -1,5 +1,6 @@
 #include "Plugin.h"
 
+#include "Core/Guard.h"
 #include "Core/Pipeline.h"
 #include "Settings.h"
 
@@ -52,7 +53,12 @@ namespace
 		}
 
 		*path /= fmt::format(FMT_STRING("{}.log"), Version::PROJECT);
-		auto sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(path->string(), true);
+		std::shared_ptr<spdlog::sinks::basic_file_sink_mt> sink;
+		try {
+			sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(path->string(), true);
+		} catch (const std::exception&) {
+			return false;  // log file cannot be opened
+		}
 #endif
 
 		auto log = std::make_shared<spdlog::logger>("global log"s, std::move(sink));
@@ -69,10 +75,37 @@ namespace
 		return true;
 	}
 
+	// CommonLibF4RD ends the game with a dialog when F4SE::Init finds no ID
+	// database (the same search as REL::IDDatabase::load). Check first, so a
+	// missing file only disables this plugin.
+	[[nodiscard]] bool IDDatabasePresent()
+	{
+		const auto version = REL::Module::get().version().string();
+		const std::array<std::filesystem::path, 3> candidates{
+			"Data/F4SE/Plugins/f4rd-runtime.bin",
+			fmt::format("Data/F4SE/Plugins/f4rd-runtime-{}.bin", version),
+			fmt::format("Data/F4SE/Plugins/version-{}.bin", version),
+		};
+		for (const auto& candidate : candidates) {
+			std::error_code error;
+			if (std::filesystem::exists(candidate, error) && !error) {
+				logger::info("ID database: {}", candidate.generic_string());
+				return true;
+			}
+		}
+		logger::critical(
+			"no ID database for runtime {}: install the CommonLibF4RD Runtime Database "
+			"(https://www.nexusmods.com/fallout4/mods/108394) as Data/F4SE/Plugins/f4rd-runtime.bin, "
+			"or Address Library for F4SE Plugins (Data/F4SE/Plugins/version-{}.bin). The plugin is disabled.",
+			version, version);
+		return false;
+	}
+
 	void F4SEAPI OnF4SEMessage(F4SE::MessagingInterface::Message* a_message)
 	{
-		if (a_message && a_message->type == F4SE::MessagingInterface::kGameDataReady) {
-			GWP::Pipeline::Get().InitializeRenderer();
+		// data is false before the game data loads and true once it has.
+		if (a_message && a_message->type == F4SE::MessagingInterface::kGameDataReady && a_message->data) {
+			GWP::Guarded("kGameDataReady", [] { GWP::Pipeline::Get().InitializeRenderer(); });
 		}
 	}
 }
@@ -87,6 +120,10 @@ bool Plugin::Initialize(const F4SE::LoadInterface* a_f4se)
 
 	if (a_f4se->IsEditor()) {
 		logger::critical("loaded in editor");
+		return false;
+	}
+
+	if (!IDDatabasePresent()) {
 		return false;
 	}
 

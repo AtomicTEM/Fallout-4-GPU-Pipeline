@@ -52,6 +52,10 @@ namespace GWP
 		std::uint32_t stableSinceFrame{ 0 };
 
 		std::atomic<std::uint32_t> lastSeenFrame{ 0 };
+		// calibration: last frames the object was queued in a started view /
+		// in a queue whose StartAccumulating was never seen
+		std::atomic<std::uint32_t> startedViewFrame{ 0 };
+		std::atomic<std::uint32_t> otherQueueFrame{ 0 };
 		std::atomic<ObjectState> state{ ObjectState::kTracking };
 		std::atomic<std::uint32_t> bucket{ kInvalidIndex };
 		std::atomic<std::uint32_t> member{ kInvalidIndex };

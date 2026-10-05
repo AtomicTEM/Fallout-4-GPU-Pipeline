@@ -1,5 +1,6 @@
 #include "Render/D3DHooks.h"
 
+#include "Core/Guard.h"
 #include "Core/Pipeline.h"
 #include "Render/InputLayouts.h"
 
@@ -82,7 +83,7 @@ namespace GWP::D3DHooks
 		{
 			const auto result = g_createInputLayout(a_this, a_descs, a_count, a_bytecode, a_length, a_layout);
 			if (SUCCEEDED(result) && a_layout && *a_layout) {
-				InputLayouts::Get().OnCreated(*a_layout, a_descs, a_count, a_bytecode, a_length);
+				Guarded("CreateInputLayout", [&] { InputLayouts::Get().OnCreated(*a_layout, a_descs, a_count, a_bytecode, a_length); });
 			}
 			return result;
 		}
@@ -93,14 +94,14 @@ namespace GWP::D3DHooks
 		{
 			const auto result = g_createDeferredContext(a_this, a_flags, a_context);
 			if (SUCCEEDED(result) && a_context && *a_context) {
-				HookContext(*a_context);
+				Guarded("CreateDeferredContext", [&] { HookContext(*a_context); });
 			}
 			return result;
 		}
 
 		void STDMETHODCALLTYPE HookDrawIndexed(ID3D11DeviceContext* a_this, UINT a_indexCount, UINT a_startIndex, INT a_baseVertex)
 		{
-			if (Pipeline::Get().OnDrawIndexed(a_this, a_indexCount, 1, a_startIndex, a_baseVertex, 0, false)) {
+			if (Guarded("DrawIndexed", [] { return false; }, [&] { return Pipeline::Get().OnDrawIndexed(a_this, a_indexCount, 1, a_startIndex, a_baseVertex, 0, false); })) {
 				return;
 			}
 			g_drawIndexed(a_this, a_indexCount, a_startIndex, a_baseVertex);
@@ -108,7 +109,7 @@ namespace GWP::D3DHooks
 
 		void STDMETHODCALLTYPE HookDrawIndexedInstanced(ID3D11DeviceContext* a_this, UINT a_indexCount, UINT a_instanceCount, UINT a_startIndex, INT a_baseVertex, UINT a_startInstance)
 		{
-			if (Pipeline::Get().OnDrawIndexed(a_this, a_indexCount, a_instanceCount, a_startIndex, a_baseVertex, a_startInstance, true)) {
+			if (Guarded("DrawIndexedInstanced", [] { return false; }, [&] { return Pipeline::Get().OnDrawIndexed(a_this, a_indexCount, a_instanceCount, a_startIndex, a_baseVertex, a_startInstance, true); })) {
 				return;
 			}
 			g_drawIndexedInstanced(a_this, a_indexCount, a_instanceCount, a_startIndex, a_baseVertex, a_startInstance);
@@ -118,7 +119,7 @@ namespace GWP::D3DHooks
 		{
 			// DXGI_PRESENT_TEST only queries occlusion state; it is not a frame.
 			if ((a_flags & DXGI_PRESENT_TEST) == 0 && !t_inPresent) {
-				Pipeline::Get().OnPresent(a_this);
+				Guarded("Present", [&] { Pipeline::Get().OnPresent(a_this); });
 			}
 			const bool outer = !t_inPresent;
 			t_inPresent = true;
@@ -131,7 +132,7 @@ namespace GWP::D3DHooks
 		{
 			// Some runtimes implement Present on top of Present1; count the frame once.
 			if ((a_flags & DXGI_PRESENT_TEST) == 0 && !t_inPresent) {
-				Pipeline::Get().OnPresent(a_this);
+				Guarded("Present1", [&] { Pipeline::Get().OnPresent(a_this); });
 			}
 			const bool outer = !t_inPresent;
 			t_inPresent = true;
@@ -195,7 +196,7 @@ namespace GWP::D3DHooks
 			const auto result = g_createDeviceAndSwapChain(a_adapter, a_driverType, a_software, a_flags, a_featureLevels, a_numFeatureLevels,
 				a_sdkVersion, a_swapChainDesc, a_swapChain, a_device, a_featureLevel, a_context);
 			if (SUCCEEDED(result) && a_device && *a_device) {
-				OnDeviceCreated(*a_device, a_context ? *a_context : nullptr, a_swapChain ? *a_swapChain : nullptr);
+				Guarded("D3D11CreateDeviceAndSwapChain", [&] { OnDeviceCreated(*a_device, a_context ? *a_context : nullptr, a_swapChain ? *a_swapChain : nullptr); });
 			}
 			return result;
 		}
@@ -208,7 +209,7 @@ namespace GWP::D3DHooks
 			const auto result = g_createDevice(a_adapter, a_driverType, a_software, a_flags, a_featureLevels, a_numFeatureLevels,
 				a_sdkVersion, a_device, a_featureLevel, a_context);
 			if (SUCCEEDED(result) && a_device && *a_device) {
-				OnDeviceCreated(*a_device, a_context ? *a_context : nullptr, nullptr);
+				Guarded("D3D11CreateDevice", [&] { OnDeviceCreated(*a_device, a_context ? *a_context : nullptr, nullptr); });
 			}
 			return result;
 		}

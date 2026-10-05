@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Checks a packaged build of the plugin: the folder layout a mod manager or a
 # manual install into Fallout 4/Data expects, and the DLL itself (64-bit PE,
-# the exports F4SE looks for, imports limited to Windows and the Visual C++
-# runtime, and the precompiled shaders that let it run without a shader
-# compiler, which Proton lacks).
+# the exports F4SE looks for, imports limited to Windows system DLLs, and the
+# precompiled shaders that let it run without a shader compiler, which Proton
+# lacks).
 #
 # Usage: tools/check-package.sh <package dir>
 #   <package dir> contains F4SE/Plugins/..., e.g. an extracted CI artifact.
@@ -56,14 +56,15 @@ for symbol in F4SEPlugin_Version F4SEPlugin_Query F4SEPlugin_Load; do
 	grep -qx "$symbol" <<<"$exports" || fail "$DLL does not export $symbol"
 done
 
-# Dependencies are linked statically (x64-windows-static-md), so the DLL may
-# import only Windows system DLLs and the release Visual C++ runtime. Anything
-# else (a vcpkg dependency's DLL, the debug CRT, d3dcompiler_47) would keep
-# the plugin from loading on some systems.
+# Dependencies and the C/C++ runtime are linked statically (x64-windows-static,
+# /MT), so the DLL may import only Windows system DLLs. Anything else (the
+# Visual C++ runtime, whose old copies crash current STL code, a vcpkg
+# dependency's DLL, d3dcompiler_47) would keep the plugin from loading or
+# crash it on some systems.
 imports=$(awk '/DLL Name:/ { print $NF }' <<<"$header")
 while read -r import; do
-	if ! grep -Eiq '^(kernel32|user32|gdi32|shell32|ole32|oleaut32|advapi32|version|d3d11|dxgi|dbghelp|bcrypt|ntdll|shlwapi|ws2_32|winmm|psapi)\.dll$|^(msvcp140(_1|_2|_atomic_wait|_codecvt_ids)?|vcruntime140(_1)?|concrt140)\.dll$|^api-ms-win-[a-z0-9-]+\.dll$' <<<"$import"; then
-		fail "$DLL imports $import, which is not a Windows system DLL or the release Visual C++ runtime"
+	if ! grep -Eiq '^(kernel32|user32|gdi32|shell32|ole32|oleaut32|advapi32|version|d3d11|dxgi|dbghelp|bcrypt|ntdll|shlwapi|ws2_32|winmm|psapi)\.dll$|^api-ms-win-core-[a-z0-9-]+\.dll$' <<<"$import"; then
+		fail "$DLL imports $import, which is not a Windows system DLL"
 	fi
 done <<<"$imports"
 

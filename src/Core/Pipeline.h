@@ -117,6 +117,9 @@ namespace GWP
 			return _batchingEnabled.load(std::memory_order_relaxed) && _calibration.BatchingAllowed();
 		}
 
+		// threads currently inside a hooked FinishAccumulating
+		std::atomic<std::uint32_t> _activeFinishes{ 0 };
+
 		std::mutex _initLock;
 		bool _hooksInstalled{ false };
 		std::atomic_bool _ready{ false };

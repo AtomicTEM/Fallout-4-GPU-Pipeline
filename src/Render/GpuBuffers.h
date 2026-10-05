@@ -68,10 +68,13 @@ namespace GWP
 	};
 
 	// CPU-writable buffer (D3D11_USAGE_DYNAMIC), recreated larger on demand.
+	// Its SRV is structured with a stride, otherwise a typed R32_UINT view.
 	class DynamicBuffer
 	{
 	public:
 		bool Create(ID3D11Device* a_device, UINT a_bindFlags, UINT a_structureStride, std::uint32_t a_bytes, const char* a_name);
+
+		void Destroy();
 
 		// Uploads a_bytes from a_data with WRITE_DISCARD, growing first if needed.
 		bool Upload(ID3D11DeviceContext* a_context, const void* a_data, std::uint32_t a_bytes);
