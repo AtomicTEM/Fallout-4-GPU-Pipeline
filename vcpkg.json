@@ -1,0 +1,13 @@
+{
+  "name": "gpu-world-pipeline",
+  "version-string": "0.1.0",
+  "description": "F4SE plugin that moves Fallout 4 worldspace draw submission from the CPU to GPU-driven batches",
+  "homepage": "https://github.com/AtomicTEM/Fallout-4-GPU-Pipeline",
+  "dependencies": [
+    "boost-stl-interfaces",
+    "fmt",
+    "rsm-mmio",
+    "spdlog",
+    "zydis"
+  ]
+}

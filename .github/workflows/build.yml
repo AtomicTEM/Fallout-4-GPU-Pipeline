@@ -1,0 +1,57 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    name: Windows (MSVC + vcpkg)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
+          cmake --preset vs2022-windows-vcpkg -DBUILD_GPU_TESTS=ON
+
+      - name: Build
+        shell: pwsh
+        run: |
+          $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
+          cmake --build --preset vs2022-release
+
+      - name: GPU tests (WARP)
+        shell: pwsh
+        run: build/vs2022/tests/Release/GpuTests.exe
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force package/Data/F4SE/Plugins | Out-Null
+          Copy-Item build/vs2022/Release/GPUWorldPipeline.dll package/Data/F4SE/Plugins/
+          Copy-Item dist/Data/F4SE/Plugins/GPUWorldPipeline.ini package/Data/F4SE/Plugins/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GPUWorldPipeline
+          path: package/
+
+  shaders-and-gpu-tests:
+    name: Linux (Wine + llvmpipe GPU tests)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends g++-mingw-w64-x86-64-posix wine64 xvfb xauth libgl1-mesa-dri libfmt-dev cmake curl unzip
+
+      - name: GPU tests
+        run: tools/run-tests-wine.sh
