@@ -4,7 +4,8 @@
 
 | What | How | Covers |
 | --- | --- | --- |
-| Plugin build | CI `Windows (MSVC + vcpkg)` job, or `cmake --preset vs2022-windows-vcpkg && cmake --build --preset vs2022-release` | Everything compiles with MSVC `/W4 /WX` against CommonLibF4RD |
+| Plugin build | CI `Plugin DLL (Windows, MSVC + vcpkg)` job, or `cmake --preset vs2022-windows-vcpkg && cmake --build --preset vs2022-release` | The plugin compiles with MSVC `/W4 /WX` against CommonLibF4RD |
+| Package | CI `Verify package (Linux)` job, or `tools/check-package.sh <extracted package>` | `F4SE/Plugins/` layout with only the DLL and INI; a 64-bit DLL exporting `F4SEPlugin_Version`, `F4SEPlugin_Query` and `F4SEPlugin_Load`; no debug-CRT or third-party DLL imports |
 | GPU tests on Windows | `-DBUILD_GPU_TESTS=ON`, then `build/vs2022/tests/Release/GpuTests.exe` | See below; uses WARP when no GPU is present |
 | GPU tests on Linux | `tools/run-tests-wine.sh` | The same tests under Wine + Mesa llvmpipe, compiled by Microsoft's `d3dcompiler_47` |
 

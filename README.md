@@ -68,7 +68,42 @@ Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
 - A Direct3D 11.0 GPU. NVIDIA drivers additionally enable the NVAPI
   multi-draw path.
 
+## Download
+
+The DLL is built by GitHub Actions on a Windows runner, so no Windows machine
+or Visual Studio is needed to get it.
+
+- **Releases:** tagged versions are on the
+  [Releases page](https://github.com/AtomicTEM/Fallout-4-GPU-Pipeline/releases)
+  as `GPUWorldPipeline-X.Y.Z.zip`, with debug symbols in
+  `GPUWorldPipeline-X.Y.Z-pdb.zip` and checksums in `SHA256SUMS.txt`.
+- **Development builds:** every push runs the
+  [Build F4SE plugin](https://github.com/AtomicTEM/Fallout-4-GPU-Pipeline/actions/workflows/build.yml)
+  workflow. Open a successful run and download
+  `GPUWorldPipeline-<version>-<commit>` under **Artifacts** (you must be
+  signed in to GitHub). The run summary also links it. From a terminal with
+  the [GitHub CLI](https://cli.github.com/):
+
+  ```sh
+  repo=AtomicTEM/Fallout-4-GPU-Pipeline
+  run=$(gh run list -R "$repo" -w build.yml -s success -L 1 --json databaseId -q '.[0].databaseId')
+  gh run download "$run" -R "$repo" -p 'GPUWorldPipeline-*'
+  ```
+
+  Add `-b <branch>` to `gh run list` to pick a branch. The plugin and its PDB
+  are downloaded into folders named after the artifacts.
+
+Every package is checked on Linux before upload. `tools/check-package.sh`
+verifies the folder layout, that the DLL is 64-bit, its F4SE exports, and that
+it does not import debug-CRT or third-party DLLs. Run it on an extracted
+package to check it yourself.
+
 ## Install
+
+Both the release zip and the artifact contain `F4SE/Plugins/`. Extract them
+into the game's `Data` folder, or install them with a mod manager. With Steam
+on Linux (Proton), that is usually
+`~/.steam/steam/steamapps/common/Fallout 4/Data`.
 
 ```text
 Data/
@@ -76,13 +111,42 @@ Data/
    └─ Plugins/
       ├─ GPUWorldPipeline.dll
       ├─ GPUWorldPipeline.ini      (optional; defaults are built in)
-      └─ f4rd-runtime.bin          (CommonLibF4RD runtime database)
+      └─ f4rd-runtime.bin          (CommonLibF4RD runtime database, not included)
 ```
 
 The log is written to `Documents/My Games/Fallout4/F4SE/GPUWorldPipeline.log`.
 **F10** toggles batching in game for A/B comparisons.
 
 ## Build
+
+CommonLibF4RD needs MSVC, so the plugin is built on Windows. On Linux or
+macOS, let GitHub Actions build it:
+
+- Push to any branch, or open **Actions → Build F4SE plugin → Run
+  workflow** to build any branch on demand. Download the result as described
+  in [Download](#download).
+- **To publish a release,** set `project(... VERSION X.Y.Z)` in
+  `CMakeLists.txt` (and `version-string` in `vcpkg.json`), commit, then push a
+  tag `vX.Y.Z`. A tag with a suffix such as `v0.2.0-beta1` gives a
+  pre-release. The release is created only after the build, the package check
+  and both test jobs pass. A tag that does not match the CMake version fails
+  the build.
+
+  ```sh
+  git tag v0.1.0
+  git push origin v0.1.0
+  ```
+
+The workflow (`.github/workflows/build.yml`) runs these jobs:
+
+| Job | Runner | Does |
+| --- | --- | --- |
+| Plugin DLL | `windows-2022` | MSVC + vcpkg (packages cached between runs) build, GPU tests on WARP, uploads the package and PDB |
+| Verify package | `ubuntu-24.04` | `tools/check-package.sh` on the uploaded package |
+| GPU tests | `ubuntu-24.04` | `tools/run-tests-wine.sh` (Wine + llvmpipe) |
+| Publish release | `ubuntu-24.04` | Tags only: zips the package and PDB, writes `SHA256SUMS.txt`, creates the GitHub Release |
+
+### Building on Windows
 
 Requirements: Visual Studio 2022 (Desktop development with C++), CMake 3.21+,
 and vcpkg with `VCPKG_ROOT` set.
@@ -112,8 +176,7 @@ multi-draw records, Hi-Z construction and occlusion decisions.
 - Linux: `tools/run-tests-wine.sh` builds with MinGW-w64 and runs under Wine
   on Mesa's llvmpipe.
 
-CI (`.github/workflows/build.yml`) builds the DLL with MSVC and runs the tests
-on both platforms.
+CI runs both on every push (see [Build](#build)).
 
 ## Configuration
 

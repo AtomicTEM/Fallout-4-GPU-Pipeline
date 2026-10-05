@@ -1,52 +1,153 @@
-name: build
+# Builds the F4SE plugin DLL on a Windows runner (CommonLibF4RD needs MSVC),
+# so it can be produced without a Windows machine.
+#
+#   Every push, pull request or manual run: build, test, upload the package as
+#   an artifact (Actions > run > Artifacts, or `gh run download`).
+#   Pushing a tag vX.Y.Z (matching project(VERSION) in CMakeLists.txt): also
+#   publish a GitHub Release with the package and PDB attached.
+name: Build F4SE plugin
 
 on:
   push:
+    branches: ['**']
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+permissions:
+  contents: read
+
 jobs:
-  windows:
-    name: Windows (MSVC + vcpkg)
+  plugin:
+    name: Plugin DLL (Windows, MSVC + vcpkg)
     runs-on: windows-2022
+    timeout-minutes: 45
+    outputs:
+      package: ${{ steps.version.outputs.package }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
-      - name: Configure
+      - name: Version
+        id: version
         shell: pwsh
         run: |
-          $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
-          cmake --preset vs2022-windows-vcpkg -DBUILD_GPU_TESTS=ON
+          $cmake = Get-Content CMakeLists.txt -Raw
+          if ($cmake -notmatch '(?s)project\s*\(\s*GPUWorldPipeline\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)') {
+            throw 'project(GPUWorldPipeline VERSION x.y.z) not found in CMakeLists.txt'
+          }
+          $version = $Matches[1]
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $label = $env:GITHUB_REF_NAME -replace '^v', ''
+            if (($label -replace '-.*$', '') -ne $version) {
+              throw "Tag $env:GITHUB_REF_NAME does not match project(VERSION $version) in CMakeLists.txt. Bump the version, then tag v$version."
+            }
+          } else {
+            $label = "$version-$($env:GITHUB_SHA.Substring(0, 7))"
+          }
+          "package=GPUWorldPipeline-$label" >> $env:GITHUB_OUTPUT
+
+      - name: Set up vcpkg
+        id: vcpkg
+        shell: pwsh
+        run: |
+          $cache = Join-Path $env:RUNNER_TEMP vcpkg-cache
+          New-Item -ItemType Directory -Force $cache | Out-Null
+          # The ports tree revision; packages built from another one are still
+          # reused when their ABI hash matches.
+          $commit = git -c 'safe.directory=*' -C $env:VCPKG_INSTALLATION_ROOT rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or -not $commit) { $commit = 'unknown'; $global:LASTEXITCODE = 0 }
+          "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
+          "VCPKG_BINARY_SOURCES=clear;files,$cache,readwrite" >> $env:GITHUB_ENV
+          "cache=$cache" >> $env:GITHUB_OUTPUT
+          "commit=$commit" >> $env:GITHUB_OUTPUT
+
+      - name: Cache vcpkg packages
+        uses: actions/cache@v5
+        with:
+          path: ${{ steps.vcpkg.outputs.cache }}
+          key: vcpkg-${{ runner.os }}-${{ steps.vcpkg.outputs.commit }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ steps.vcpkg.outputs.commit }}-
+            vcpkg-${{ runner.os }}-
+
+      - name: Configure
+        run: cmake --preset vs2022-windows-vcpkg -DBUILD_GPU_TESTS=ON
 
       - name: Build
-        shell: pwsh
-        run: |
-          $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
-          cmake --build --preset vs2022-release
+        run: cmake --build --preset vs2022-release
 
       - name: GPU tests (WARP)
-        shell: pwsh
         run: build/vs2022/tests/Release/GpuTests.exe
 
       - name: Package
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force package/Data/F4SE/Plugins | Out-Null
-          Copy-Item build/vs2022/Release/GPUWorldPipeline.dll package/Data/F4SE/Plugins/
-          Copy-Item dist/Data/F4SE/Plugins/GPUWorldPipeline.ini package/Data/F4SE/Plugins/
+          $plugins = New-Item -ItemType Directory -Force package/F4SE/Plugins
+          Copy-Item build/vs2022/Release/GPUWorldPipeline.dll, dist/Data/F4SE/Plugins/GPUWorldPipeline.ini $plugins
+          New-Item -ItemType Directory -Force symbols | Out-Null
+          Copy-Item build/vs2022/Release/GPUWorldPipeline.pdb symbols/
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload plugin
+        id: upload
+        uses: actions/upload-artifact@v7
         with:
-          name: GPUWorldPipeline
+          name: ${{ steps.version.outputs.package }}
           path: package/
+          if-no-files-found: error
 
-  shaders-and-gpu-tests:
-    name: Linux (Wine + llvmpipe GPU tests)
+      - name: Upload PDB
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.version.outputs.package }}-pdb
+          path: symbols/
+          if-no-files-found: error
+
+      - name: Summary
+        shell: pwsh
+        env:
+          PACKAGE: ${{ steps.version.outputs.package }}
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+        run: |
+          @"
+          ### $env:PACKAGE
+
+          Download: [$env:PACKAGE.zip]($env:ARTIFACT_URL) (requires being signed in to GitHub). Extract it into ``Fallout 4/Data``, or install the zip with a mod manager.
+
+          From a terminal:
+
+          ``````sh
+          gh run download $env:GITHUB_RUN_ID -R $env:GITHUB_REPOSITORY -n $env:PACKAGE -D $env:PACKAGE
+          ``````
+          "@ >> $env:GITHUB_STEP_SUMMARY
+
+  verify-package:
+    name: Verify package (Linux)
+    needs: plugin
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.plugin.outputs.package }}
+          path: package
+
+      - name: Check layout and DLL
+        run: tools/check-package.sh package
+
+  wine-tests:
+    name: GPU tests (Linux, Wine + llvmpipe)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
 
       - name: Install tools
         run: |
@@ -55,3 +156,50 @@ jobs:
 
       - name: GPU tests
         run: tools/run-tests-wine.sh
+
+  release:
+    name: Publish release
+    if: github.ref_type == 'tag'
+    needs: [plugin, verify-package, wine-tests]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      PACKAGE: ${{ needs.plugin.outputs.package }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.plugin.outputs.package }}
+          path: artifacts/plugin
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.plugin.outputs.package }}-pdb
+          path: artifacts/pdb
+
+      - name: Create archives
+        run: |
+          mkdir assets
+          (cd artifacts/plugin && zip -9 -r -X "../../assets/$PACKAGE.zip" F4SE)
+          (cd artifacts/pdb && zip -9 -X "../../assets/$PACKAGE-pdb.zip" GPUWorldPipeline.pdb)
+          (cd assets && sha256sum -- *.zip > SHA256SUMS.txt && cat SHA256SUMS.txt)
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" assets/* --clobber
+            exit 0
+          fi
+          notes="- **Install:** extract \`$PACKAGE.zip\` into \`Fallout 4/Data\`, or install it with a mod manager.
+          - **Requires:** F4SE and the CommonLibF4RD runtime database (\`Data/F4SE/Plugins/f4rd-runtime.bin\`), which is distributed separately.
+          - \`$PACKAGE-pdb.zip\` holds debug symbols for crash reports. It is not needed to play."
+          flags=(--verify-tag --title "GPU World Pipeline $TAG" --notes "$notes" --generate-notes)
+          if [[ "$TAG" == *-* ]]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$TAG" assets/* "${flags[@]}"
