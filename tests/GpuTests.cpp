@@ -1,6 +1,7 @@
 // Functional tests for the GPU side of the plugin. They run the real HLSL
-// (compiled by d3dcompiler_47 exactly as the plugin does) and the real C++
-// modules on a Direct3D 11 device, without Fallout 4.
+// (the bytecode fxc precompiled into the DLL when the build has it, otherwise
+// compiled at runtime by d3dcompiler_47) and the real C++ modules on a
+// Direct3D 11 device, without Fallout 4.
 //
 //   Windows:  GpuTests.exe
 //   Linux:    tools/run-tests-wine.sh (Wine + Mesa llvmpipe)
@@ -529,6 +530,39 @@ namespace
 		return vertices;
 	}
 
+	void TestShaderLibrary(Gpu& a_gpu)
+	{
+		std::puts("ShaderLibrary");
+
+		// Must match COMPUTE_SHADERS in cmake/sourcelist.cmake.
+		constexpr std::array<std::pair<std::string_view, const char*>, 6> kShaders{ {
+			{ "Cull.hlsl"sv, "CSCompact" },
+			{ "Cull.hlsl"sv, "CSMultiDraw" },
+			{ "HiZ.hlsl"sv, "CSInit" },
+			{ "HiZ.hlsl"sv, "CSReduce" },
+			{ "MergeIndices.hlsl"sv, "CSMain" },
+			{ "MergeVertices.hlsl"sv, "CSMain" },
+		} };
+
+		const auto precompiled = ShaderLibrary::PrecompiledCount();
+		std::printf("  %zu precompiled shaders\n", precompiled);
+#ifdef GWP_PRECOMPILED_SHADERS
+		CHECK(precompiled == kShaders.size());
+#endif
+		for (const auto& [file, entry] : kShaders) {
+			if (precompiled > 0) {
+				const auto bytecode = ShaderLibrary::FindPrecompiled(file, entry);
+				CHECK(bytecode && bytecode->size() > 4 && std::memcmp(bytecode->data(), "DXBC", 4) == 0);
+				CHECK(a_gpu.shaders.CompileCompute(file, entry) != nullptr);
+			}
+
+			// The runtime compiler is still used for [Debug] sShaderDirectory.
+			a_gpu.shaders.SetUsePrecompiled(false);
+			CHECK(a_gpu.shaders.CompileCompute(file, entry) != nullptr);
+			a_gpu.shaders.SetUsePrecompiled(true);
+		}
+	}
+
 	void TestMergeVertices(Gpu& a_gpu)
 	{
 		std::puts("MergeVertices.hlsl");
@@ -1052,6 +1086,7 @@ int main(int a_argc, char** a_argv)
 		std::puts("no Direct3D 11 device or d3dcompiler_47.dll; GPU tests skipped");
 		++g_failures;
 	} else {
+		TestShaderLibrary(gpu);
 		TestMergeVertices(gpu);
 		TestMergeIndices(gpu);
 		TestCullCompaction(gpu);

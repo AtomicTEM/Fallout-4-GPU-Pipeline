@@ -79,24 +79,30 @@ or Visual Studio is needed to get it.
   `GPUWorldPipeline-X.Y.Z-pdb.zip` and checksums in `SHA256SUMS.txt`.
 - **Development builds:** every push runs the
   [Build F4SE plugin](https://github.com/AtomicTEM/Fallout-4-GPU-Pipeline/actions/workflows/build.yml)
-  workflow. Open a successful run and download
+  workflow. Open a successful run started by a **push** and download
   `GPUWorldPipeline-<version>-<commit>` under **Artifacts** (you must be
-  signed in to GitHub). The run summary also links it. From a terminal with
-  the [GitHub CLI](https://cli.github.com/):
+  signed in to GitHub). The run summary also links it. Pull-request runs
+  have artifacts too, including runs for pull requests from forks. They are
+  builds of unreviewed code, so do not install them. From a terminal with the
+  [GitHub CLI](https://cli.github.com/):
 
   ```sh
   repo=AtomicTEM/Fallout-4-GPU-Pipeline
-  run=$(gh run list -R "$repo" -w build.yml -s success -L 1 --json databaseId -q '.[0].databaseId')
-  gh run download "$run" -R "$repo" -p 'GPUWorldPipeline-*'
+  run=$(gh run list -R "$repo" -w build.yml -e push -s success -L 1 --json databaseId -q '.[0].databaseId')
+  gh run download "${run:?no successful build found}" -R "$repo" -p 'GPUWorldPipeline-*'
   ```
 
-  Add `-b <branch>` to `gh run list` to pick a branch. The plugin and its PDB
-  are downloaded into folders named after the artifacts.
+  Add `-b <branch>` to `gh run list` to pick a branch, and keep `-e push`.
+  The plugin and its PDB are downloaded into folders named after the
+  artifacts.
 
-Every package is checked on Linux before upload. `tools/check-package.sh`
-verifies the folder layout, that the DLL is 64-bit, its F4SE exports, and that
-it does not import debug-CRT or third-party DLLs. Run it on an extracted
-package to check it yourself.
+Every package is checked on Linux by the **Verify package** job after it is
+built. A run is green, and a release is published, only if that check passes,
+so take artifacts from successful runs. `tools/check-package.sh` verifies the
+folder layout, that the DLL is 64-bit, its F4SE exports, that it imports only
+Windows system DLLs and the Visual C++ runtime, and that it embeds the
+precompiled shaders. Run it on an extracted package to check it yourself. It
+needs GNU binutils' `objdump`.
 
 ## Install
 
@@ -104,6 +110,11 @@ Both the release zip and the artifact contain `F4SE/Plugins/`. Extract them
 into the game's `Data` folder, or install them with a mod manager. With Steam
 on Linux (Proton), that is usually
 `~/.steam/steam/steamapps/common/Fallout 4/Data`.
+
+**Proton:** no extra components are needed. The shaders are compiled into the
+DLL at build time, so Wine's built-in shader compiler is never used. The logs
+are in the game's prefix:
+`~/.steam/steam/steamapps/compatdata/377160/pfx/drive_c/users/steamuser/Documents/My Games/Fallout4/F4SE/`.
 
 ```text
 Data/
@@ -124,13 +135,22 @@ macOS, let GitHub Actions build it:
 
 - Push to any branch, or open **Actions → Build F4SE plugin → Run
   workflow** to build any branch on demand. Download the result as described
-  in [Download](#download).
+  in [Download](#download). On a fork, enable Actions in the fork's settings
+  and set `repo` to the fork. To wait for, and fetch, the build of the commit
+  you just pushed:
+
+  ```sh
+  run=$(gh run list -R "$repo" -w build.yml -e push -c "$(git rev-parse HEAD)" -L 1 --json databaseId -q '.[0].databaseId')
+  gh run watch "${run:?no run for this commit yet}" -R "$repo" --exit-status &&
+    gh run download "$run" -R "$repo" -p 'GPUWorldPipeline-*'
+  ```
 - **To publish a release,** set `project(... VERSION X.Y.Z)` in
   `CMakeLists.txt` (and `version-string` in `vcpkg.json`), commit, then push a
   tag `vX.Y.Z`. A tag with a suffix such as `v0.2.0-beta1` gives a
   pre-release. The release is created only after the build, the package check
   and both test jobs pass. A tag that does not match the CMake version fails
-  the build.
+  the build. To fix that, set the version, commit, and move the tag:
+  `git push origin :refs/tags/vX.Y.Z && git tag -f vX.Y.Z && git push origin vX.Y.Z`.
 
   ```sh
   git tag v0.1.0
@@ -141,7 +161,7 @@ The workflow (`.github/workflows/build.yml`) runs these jobs:
 
 | Job | Runner | Does |
 | --- | --- | --- |
-| Plugin DLL | `windows-2022` | MSVC + vcpkg (packages cached between runs) build, GPU tests on WARP, uploads the package and PDB |
+| Plugin DLL | `windows-2022` | MSVC + vcpkg (packages cached between runs) build with shaders precompiled by `fxc`, GPU tests on WARP, uploads the package and PDB |
 | Verify package | `ubuntu-24.04` | `tools/check-package.sh` on the uploaded package |
 | GPU tests | `ubuntu-24.04` | `tools/run-tests-wine.sh` (Wine + llvmpipe) |
 | Publish release | `ubuntu-24.04` | Tags only: zips the package and PDB, writes `SHA256SUMS.txt`, creates the GitHub Release |
@@ -161,9 +181,14 @@ cmake --build --preset vs2022-release
 Output: `build/vs2022/Release/GPUWorldPipeline.dll`. Pass `-DCOPY_BUILD=ON`
 with `Fallout4Path` set to copy the DLL and INI into the game folder.
 
-The HLSL in `shaders/` is embedded into the DLL and compiled at start-up by
-Windows' `d3dcompiler_47.dll` (`cs_5_0`). `[Debug] sShaderDirectory` loads
-shader files from disk instead, for iteration without rebuilding.
+The compute shaders in `shaders/` are compiled at build time by the Windows
+SDK's `fxc` (`cs_5_0`) and embedded in the DLL as bytecode, so no shader
+compiler is needed at runtime. Configuring fails if `fxc` is not found. Pass
+`-DREQUIRE_PRECOMPILED_SHADERS=OFF` to build a DLL that compiles them at
+start-up with `d3dcompiler_47.dll` instead (that does not work under Proton).
+`[Debug] sShaderDirectory` loads shader files from disk and compiles them at
+runtime, for iteration without rebuilding. Under Proton that needs Microsoft's
+compiler in the prefix (`protontricks 377160 d3dcompiler_47`).
 
 ### Tests
 

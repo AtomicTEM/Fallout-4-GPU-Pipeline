@@ -52,6 +52,17 @@ set(SHADERS
 	MergeVertices.hlsl
 )
 
+# Compute shader entry points (file:entry), compiled with fxc at build time
+# and embedded as bytecode (see cmake/EmbedShaderBytecode.cmake)
+set(COMPUTE_SHADERS
+	Cull.hlsl:CSCompact
+	Cull.hlsl:CSMultiDraw
+	HiZ.hlsl:CSInit
+	HiZ.hlsl:CSReduce
+	MergeIndices.hlsl:CSMain
+	MergeVertices.hlsl:CSMain
+)
+
 set(SHADERS_ABS)
 foreach (_shader IN LISTS SHADERS)
 	list(APPEND SHADERS_ABS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_shader}")

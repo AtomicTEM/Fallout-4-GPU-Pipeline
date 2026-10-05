@@ -13,6 +13,10 @@ add_executable(
 )
 
 add_dependencies(GpuTests GenerateEmbeddedShaders)
+if (TARGET GeneratePrecompiledShaders)
+	add_dependencies(GpuTests GeneratePrecompiledShaders)
+	target_compile_definitions(GpuTests PRIVATE GWP_PRECOMPILED_SHADERS)
+endif ()
 
 target_compile_features(GpuTests PRIVATE cxx_std_20)
 

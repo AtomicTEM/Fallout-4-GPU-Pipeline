@@ -6,10 +6,14 @@
 # Ubuntu/Debian packages:
 #   g++-mingw-w64-x86-64-posix wine64 xvfb xauth libgl1-mesa-dri libfmt-dev cmake curl unzip
 #
-# Wine's built-in HLSL compiler cannot compile these shaders, so Microsoft's
-# d3dcompiler_47 is used instead. Set D3DCOMPILER=/path/to/d3dcompiler_47.dll,
-# or let the script take D3DCompiler_47_cor3.dll from the .NET WindowsDesktop
-# runtime pack on nuget.org (the copy WPF ships with).
+# Like the MSVC build, the compute shaders are precompiled and embedded in the
+# test binary, so the tests run the same bytecode path as the shipped DLL on
+# Proton. Wine's built-in HLSL compiler cannot compile these shaders, so
+# Microsoft's d3dcompiler_47 does the compiling (tools/compile-shader.cpp
+# stands in for fxc) and also serves the tests' runtime-compile checks. Set
+# D3DCOMPILER=/path/to/d3dcompiler_47.dll, or let the script take
+# D3DCompiler_47_cor3.dll from the .NET WindowsDesktop runtime pack on
+# nuget.org (the copy WPF ships with).
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -30,17 +34,6 @@ cmake -DOUTPUT="$OUT/include/EmbeddedShaders.h" -DSHADER_DIR="$ROOT/shaders" -DS
 ln -sfn "${FMT_INCLUDE:-/usr/include/fmt}" "$OUT/deps/fmt"
 WINDOWS_H=$(echo '#include <windows.h>' | "$CXX" -x c++ -E -H - 2>&1 >/dev/null | awk '/\/windows\.h$/ && !found { sub(/^\.+ /, ""); print; found = 1 }')
 ln -sfn "$WINDOWS_H" "$OUT/deps/Windows.h"
-
-"$CXX" -std=c++20 -O1 -static -DFMT_HEADER_ONLY \
-	-I "$OUT/include" -I "$ROOT/src" -I "$ROOT/tests" -isystem "$OUT/deps" \
-	-include "$ROOT/tests/TestPCH.h" \
-	"$ROOT/tests/GpuTests.cpp" \
-	"$ROOT/src/Render/GpuBuffers.cpp" \
-	"$ROOT/src/Render/HiZ.cpp" \
-	"$ROOT/src/Render/ShaderLibrary.cpp" \
-	"$ROOT/src/Scene/MergeMath.cpp" \
-	"$ROOT/src/Scene/VertexFormat.cpp" \
-	-o "$OUT/GpuTests.exe" -ld3d11 -ldxgi -ldxguid -luuid
 
 if [[ -z "${D3DCOMPILER:-}" ]]; then
 	D3DCOMPILER="$OUT/deps/D3DCompiler_47_cor3.dll"
@@ -64,6 +57,30 @@ if [[ -z "${DISPLAY:-}" ]]; then
 	trap 'kill $XVFB_PID 2>/dev/null || true' EXIT
 	sleep 2
 fi
+
+# Precompile the compute shaders listed in cmake/sourcelist.cmake.
+"$CXX" -O1 -static "$ROOT/tools/compile-shader.cpp" -o "$OUT/compile-shader.exe"
+COMPUTE_SHADERS=$(awk '/^set\(COMPUTE_SHADERS/ { list = 1; next } list && /^\)/ { exit } list { print $1 }' "$ROOT/cmake/sourcelist.cmake")
+mkdir -p "$OUT/bytecode"
+for shader in $COMPUTE_SHADERS; do
+	file=${shader%%:*}
+	entry=${shader#*:}
+	ident=$(printf '%s_%s' "$file" "$entry" | tr -c 'A-Za-z0-9_' '_')
+	"$WINE" "$OUT/compile-shader.exe" "$("$WINE" winepath -w "$ROOT/shaders/$file")" "$entry" "$("$WINE" winepath -w "$OUT/bytecode/$ident.cso")"
+done
+cmake -DOUTPUT="$OUT/include/PrecompiledShaders.h" -DBYTECODE_DIR="$OUT/bytecode" -DSHADERS="$(paste -sd';' <<<"$COMPUTE_SHADERS")" \
+	-P "$ROOT/cmake/EmbedShaderBytecode.cmake"
+
+"$CXX" -std=c++20 -O1 -static -DFMT_HEADER_ONLY -DGWP_PRECOMPILED_SHADERS \
+	-I "$OUT/include" -I "$ROOT/src" -I "$ROOT/tests" -isystem "$OUT/deps" \
+	-include "$ROOT/tests/TestPCH.h" \
+	"$ROOT/tests/GpuTests.cpp" \
+	"$ROOT/src/Render/GpuBuffers.cpp" \
+	"$ROOT/src/Render/HiZ.cpp" \
+	"$ROOT/src/Render/ShaderLibrary.cpp" \
+	"$ROOT/src/Scene/MergeMath.cpp" \
+	"$ROOT/src/Scene/VertexFormat.cpp" \
+	-o "$OUT/GpuTests.exe" -ld3d11 -ldxgi -ldxguid -luuid
 
 cd "$OUT"
 "$WINE" GpuTests.exe "$@"

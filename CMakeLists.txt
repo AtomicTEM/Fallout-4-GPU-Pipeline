@@ -4,6 +4,7 @@ cmake_minimum_required(VERSION 3.21)
 
 option(COPY_BUILD "Copy the build output to the Fallout 4 directory." OFF)
 option(BUILD_GPU_TESTS "Build tests/GpuTests (GPU pipeline tests that run without Fallout 4)." OFF)
+option(REQUIRE_PRECOMPILED_SHADERS "Fail the configure step when fxc is not found, instead of building a DLL that compiles its shaders at runtime." ON)
 
 # ---- Cache build vars ----
 
@@ -117,6 +118,80 @@ add_custom_command(
 
 add_custom_target(GenerateEmbeddedShaders DEPENDS "${EMBEDDED_SHADER_HEADER}")
 
+# ---- Precompiled shaders ----
+
+# fxc from the Windows SDK compiles the compute shaders at build time, so the
+# DLL needs no shader compiler at runtime. Wine/Proton's built-in
+# d3dcompiler_47 cannot compile them.
+set(_programFilesX86 "ProgramFiles(x86)")
+set(_windowsKitsBin "$ENV{${_programFilesX86}}/Windows Kits/10/bin")
+set(_fxcHints)
+foreach (_sdkVersion IN ITEMS "${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}" "$ENV{WindowsSDKVersion}")
+	string(REGEX REPLACE "[\\/]+$" "" _sdkVersion "${_sdkVersion}")
+	if (_sdkVersion)
+		list(APPEND _fxcHints "${_windowsKitsBin}/${_sdkVersion}/x64")
+	endif ()
+endforeach ()
+file(GLOB _installedSdks LIST_DIRECTORIES true "${_windowsKitsBin}/10.*")
+list(SORT _installedSdks COMPARE NATURAL ORDER DESCENDING)
+foreach (_sdk IN LISTS _installedSdks)
+	list(APPEND _fxcHints "${_sdk}/x64")
+endforeach ()
+find_program(FXC_EXECUTABLE fxc HINTS ${_fxcHints})
+
+set(PRECOMPILED_SHADER_HEADER "${CMAKE_CURRENT_BINARY_DIR}/include/PrecompiledShaders.h")
+set(PRECOMPILED_SHADER_SOURCES)
+if (FXC_EXECUTABLE)
+	message(STATUS "Precompiling shaders with ${FXC_EXECUTABLE}")
+	set(_bytecodeDir "${CMAKE_CURRENT_BINARY_DIR}/shaders")
+	set(_bytecodeFiles)
+	foreach (_shader IN LISTS COMPUTE_SHADERS)
+		string(REPLACE ":" ";" _parts "${_shader}")
+		list(GET _parts 0 _file)
+		list(GET _parts 1 _entry)
+		string(MAKE_C_IDENTIFIER "${_file}_${_entry}" _ident)
+		set(_bytecode "${_bytecodeDir}/${_ident}.cso")
+
+		# The same profile and flags as ShaderLibrary's runtime compile.
+		add_custom_command(
+			OUTPUT "${_bytecode}"
+			COMMAND "${CMAKE_COMMAND}" -E make_directory "${_bytecodeDir}"
+			COMMAND "${FXC_EXECUTABLE}" /nologo /T cs_5_0 /E "${_entry}" /O3 /Ges /Fo "${_bytecode}" "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_file}"
+			DEPENDS ${SHADERS_ABS}
+			COMMENT "Compiling ${_file}:${_entry}"
+			VERBATIM
+		)
+		list(APPEND _bytecodeFiles "${_bytecode}")
+	endforeach ()
+
+	add_custom_command(
+		OUTPUT "${PRECOMPILED_SHADER_HEADER}"
+		COMMAND
+			"${CMAKE_COMMAND}"
+			"-DOUTPUT=${PRECOMPILED_SHADER_HEADER}"
+			"-DBYTECODE_DIR=${_bytecodeDir}"
+			"-DSHADERS=${COMPUTE_SHADERS}"
+			-P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedShaderBytecode.cmake"
+		DEPENDS
+			${_bytecodeFiles}
+			"${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedShaderBytecode.cmake"
+		COMMENT "Embedding shader bytecode"
+		VERBATIM
+	)
+
+	add_custom_target(GeneratePrecompiledShaders DEPENDS "${PRECOMPILED_SHADER_HEADER}")
+	set(PRECOMPILED_SHADER_SOURCES "${PRECOMPILED_SHADER_HEADER}")
+elseif (REQUIRE_PRECOMPILED_SHADERS)
+	message(
+		FATAL_ERROR
+		"fxc.exe (Windows SDK) was not found, so the shaders cannot be precompiled. "
+		"Install the Windows 10/11 SDK, or pass -DREQUIRE_PRECOMPILED_SHADERS=OFF to build a DLL that "
+		"compiles its shaders at runtime (it will not work under Wine/Proton)."
+	)
+else ()
+	message(WARNING "fxc.exe not found; the DLL will compile its shaders at runtime with d3dcompiler_47.dll")
+endif ()
+
 # ---- Create DLL ----
 
 add_library(
@@ -125,6 +200,7 @@ add_library(
 	${SOURCES}
 	${SHADERS_ABS}
 	"${EMBEDDED_SHADER_HEADER}"
+	${PRECOMPILED_SHADER_SOURCES}
 	${CMAKE_CURRENT_BINARY_DIR}/version.rc
 	.clang-format
 )
@@ -134,6 +210,10 @@ add_library(
 set_source_files_properties(${SHADERS_ABS} PROPERTIES HEADER_FILE_ONLY TRUE)
 
 add_dependencies(${PROJECT_NAME} GenerateEmbeddedShaders)
+if (TARGET GeneratePrecompiledShaders)
+	add_dependencies(${PROJECT_NAME} GeneratePrecompiledShaders)
+	target_compile_definitions(${PROJECT_NAME} PRIVATE GWP_PRECOMPILED_SHADERS)
+endif ()
 
 target_compile_definitions(
 	${PROJECT_NAME}

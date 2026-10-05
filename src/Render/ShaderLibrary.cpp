@@ -3,6 +3,10 @@
 #include "EmbeddedShaders.h"
 #include "Settings.h"
 
+#ifdef GWP_PRECOMPILED_SHADERS
+#	include "PrecompiledShaders.h"
+#endif
+
 namespace GWP
 {
 	namespace
@@ -40,9 +44,54 @@ namespace GWP
 	bool ShaderLibrary::Initialize(ID3D11Device* a_device)
 	{
 		_device = a_device;
+		if (PrecompiledAllowed() && PrecompiledCount() > 0) {
+			logger::info("shaders: using {} precompiled compute shaders", PrecompiledCount());
+			return true;
+		}
+		return LoadCompiler();
+	}
+
+	std::size_t ShaderLibrary::PrecompiledCount() noexcept
+	{
+#ifdef GWP_PRECOMPILED_SHADERS
+		return std::size(PrecompiledShaders::kAll);
+#else
+		return 0;
+#endif
+	}
+
+	std::optional<std::span<const std::uint8_t>> ShaderLibrary::FindPrecompiled([[maybe_unused]] std::string_view a_file, [[maybe_unused]] std::string_view a_entryPoint) noexcept
+	{
+#ifdef GWP_PRECOMPILED_SHADERS
+		for (const auto& entry : PrecompiledShaders::kAll) {
+			if (entry.file == a_file && entry.entryPoint == a_entryPoint) {
+				return entry.bytecode;
+			}
+		}
+#endif
+		return std::nullopt;
+	}
+
+	bool ShaderLibrary::PrecompiledAllowed() const
+	{
+		// Shader overrides on disk are compiled at runtime so they can be
+		// edited without rebuilding the DLL.
+		return _usePrecompiled && Settings::Get().shaderDirectory.empty();
+	}
+
+	bool ShaderLibrary::LoadCompiler()
+	{
+		if (_compile) {
+			return true;
+		}
+		if (_compilerLoadAttempted) {
+			return false;
+		}
+		_compilerLoadAttempted = true;
+
 		_compilerModule = ::LoadLibraryW(L"d3dcompiler_47.dll");
 		if (!_compilerModule) {
-			logger::error("shaders: d3dcompiler_47.dll could not be loaded");
+			logger::error("shaders: d3dcompiler_47.dll could not be loaded (error {})", ::GetLastError());
 			return false;
 		}
 
@@ -75,7 +124,24 @@ namespace GWP
 
 	Microsoft::WRL::ComPtr<ID3D11ComputeShader> ShaderLibrary::CompileCompute(std::string_view a_file, const char* a_entryPoint, std::initializer_list<std::pair<const char*, const char*>> a_defines)
 	{
-		if (!_compile || !_device) {
+		if (!_device) {
+			return nullptr;
+		}
+
+		if (PrecompiledAllowed() && a_defines.size() == 0) {
+			if (const auto bytecode = FindPrecompiled(a_file, a_entryPoint)) {
+				Microsoft::WRL::ComPtr<ID3D11ComputeShader> shader;
+				const auto result = _device->CreateComputeShader(bytecode->data(), bytecode->size(), nullptr, shader.GetAddressOf());
+				if (FAILED(result)) {
+					logger::error("shaders: CreateComputeShader failed for precompiled {}:{} (0x{:08X})", a_file, a_entryPoint, static_cast<std::uint32_t>(result));
+					return nullptr;
+				}
+				return shader;
+			}
+		}
+
+		if (!LoadCompiler()) {
+			logger::error("shaders: {}:{} needs d3dcompiler_47.dll to compile at runtime", a_file, a_entryPoint);
 			return nullptr;
 		}
 

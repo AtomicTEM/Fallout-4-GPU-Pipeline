@@ -45,7 +45,7 @@ jobs:
           if ($env:GITHUB_REF_TYPE -eq 'tag') {
             $label = $env:GITHUB_REF_NAME -replace '^v', ''
             if (($label -replace '-.*$', '') -ne $version) {
-              throw "Tag $env:GITHUB_REF_NAME does not match project(VERSION $version) in CMakeLists.txt. Bump the version, then tag v$version."
+              throw "Tag $env:GITHUB_REF_NAME does not match project(VERSION $version) in CMakeLists.txt. Set project(VERSION $($label -replace '-.*$', '')), commit, and move the tag (git push origin :refs/tags/$env:GITHUB_REF_NAME; git tag -f $env:GITHUB_REF_NAME; git push origin $env:GITHUB_REF_NAME), or tag v$version instead."
             }
           } else {
             $label = "$version-$($env:GITHUB_SHA.Substring(0, 7))"

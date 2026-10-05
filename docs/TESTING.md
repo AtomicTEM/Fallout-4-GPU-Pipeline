@@ -5,12 +5,15 @@
 | What | How | Covers |
 | --- | --- | --- |
 | Plugin build | CI `Plugin DLL (Windows, MSVC + vcpkg)` job, or `cmake --preset vs2022-windows-vcpkg && cmake --build --preset vs2022-release` | The plugin compiles with MSVC `/W4 /WX` against CommonLibF4RD |
-| Package | CI `Verify package (Linux)` job, or `tools/check-package.sh <extracted package>` | `F4SE/Plugins/` layout with only the DLL and INI; a 64-bit DLL exporting `F4SEPlugin_Version`, `F4SEPlugin_Query` and `F4SEPlugin_Load`; no debug-CRT or third-party DLL imports |
-| GPU tests on Windows | `-DBUILD_GPU_TESTS=ON`, then `build/vs2022/tests/Release/GpuTests.exe` | See below; uses WARP when no GPU is present |
-| GPU tests on Linux | `tools/run-tests-wine.sh` | The same tests under Wine + Mesa llvmpipe, compiled by Microsoft's `d3dcompiler_47` |
+| Package | CI `Verify package (Linux)` job, or `tools/check-package.sh <extracted package>` | `F4SE/Plugins/` layout with only the DLL and INI; a 64-bit DLL exporting `F4SEPlugin_Version`, `F4SEPlugin_Query` and `F4SEPlugin_Load`; imports limited to Windows system DLLs and the release Visual C++ runtime; one embedded DXBC blob per compute shader |
+| GPU tests on Windows | `-DBUILD_GPU_TESTS=ON`, then `build/vs2022/tests/Release/GpuTests.exe` | See below, on the bytecode `fxc` precompiled; uses WARP when no GPU is present |
+| GPU tests on Linux | `tools/run-tests-wine.sh` | The same tests under Wine + Mesa llvmpipe. Shaders are precompiled with Microsoft's `d3dcompiler_47` (`tools/compile-shader.cpp` stands in for `fxc`), so the tests run the same bytecode path as the plugin on Proton |
 
 `GpuTests` checks:
 
+- **Shader library:** every compute shader is embedded as DXBC bytecode and
+  creates a shader. Each one also compiles at runtime, the path used by
+  `[Debug] sShaderDirectory`.
 - **Range allocator:** alignment, padding reuse, growth and coalescing.
 - **Merge transform:** member→anchor composition, direction matrices (exact
   identity for aligned members), mirrored-winding detection, degenerate

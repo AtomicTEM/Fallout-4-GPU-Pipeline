@@ -56,7 +56,7 @@ No executable code is patched and no raw addresses are used.
 | | `src/Render/HiZ.*` | Depth pyramid |
 | | `src/Render/GpuBuffers.*` | Arenas and upload buffers |
 | | `src/Render/NvApi.*` | NVAPI multi-draw |
-| | `src/Render/ShaderLibrary.*` | Runtime HLSL compiler |
+| | `src/Render/ShaderLibrary.*` | Compute shaders: bytecode precompiled by `fxc`, or runtime HLSL compilation for overrides |
 | Shaders | `shaders/MergeVertices.hlsl`, `MergeIndices.hlsl`, `Cull.hlsl`, `HiZ.hlsl` | `cs_5_0` compute |
 
 ## 3. Object lifecycle
