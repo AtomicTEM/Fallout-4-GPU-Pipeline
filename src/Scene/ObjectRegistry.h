@@ -62,6 +62,9 @@ namespace GWP
 		std::atomic<bool> commandBuffers{ false };
 		std::atomic<std::uint32_t> detachFrame{ 0 };     // last frame its passes were detached for a capture
 		std::atomic<std::uint32_t> detachAttempts{ 0 };  // frames detached since it became a candidate
+		// diagnostics: AccumulatorStats slot of its last main / shadow registration (0xFF: none)
+		std::atomic<std::uint8_t> lastMainQueue{ 0xFF };
+		std::atomic<std::uint8_t> lastShadowQueue{ 0xFF };
 		Engine::MeshBuffers mesh;  // read at creation
 		std::atomic<ObjectState> state{ ObjectState::kTracking };
 		std::atomic<std::uint32_t> bucket{ kInvalidIndex };

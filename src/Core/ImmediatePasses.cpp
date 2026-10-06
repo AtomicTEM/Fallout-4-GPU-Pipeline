@@ -74,6 +74,16 @@ namespace GWP
 		}
 	}
 
+	bool ImmediatePasses::IsAnchorPass(const void* a_pass)
+	{
+		if (_count.load(std::memory_order_acquire) == 0) {
+			return false;
+		}
+		std::scoped_lock lock{ _lock };
+		const auto it = _index.find(a_pass);
+		return it != _index.end() && _entries[it->second].bucket != nullptr;
+	}
+
 	void ImmediatePasses::ReattachAll()
 	{
 		if (_count.load(std::memory_order_acquire) == 0) {

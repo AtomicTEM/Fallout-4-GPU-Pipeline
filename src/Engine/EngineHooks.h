@@ -41,4 +41,7 @@ namespace GWP::EngineHooks
 		std::uintptr_t prePass{ 0 };
 	};
 	[[nodiscard]] const ShaderVTables& HookedShaderVTables() noexcept;
+
+	// Primary vtable of BSShaderAccumulator (the accumulator hooks).
+	[[nodiscard]] std::uintptr_t AccumulatorVTable() noexcept;
 }

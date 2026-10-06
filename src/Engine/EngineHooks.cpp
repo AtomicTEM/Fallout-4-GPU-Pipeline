@@ -92,6 +92,7 @@ namespace GWP::EngineHooks
 		}
 
 		std::uintptr_t g_triShapeVTable{ 0 };
+		std::uintptr_t g_accumulatorVTable{ 0 };
 		ShaderVTables g_shaderVTables;
 
 		template <class F>
@@ -191,6 +192,11 @@ namespace GWP::EngineHooks
 		return g_shaderVTables;
 	}
 
+	std::uintptr_t AccumulatorVTable() noexcept
+	{
+		return g_accumulatorVTable;
+	}
+
 	bool Install()
 	{
 		const auto triShape = PrimaryVTable(RE::VTABLE::BSTriShape, "BSTriShape");
@@ -205,6 +211,7 @@ namespace GWP::EngineHooks
 			return false;
 		}
 		g_triShapeVTable = triShape;
+		g_accumulatorVTable = accumulator;
 		g_shaderVTables = { lighting, utility, prePass };
 
 		LightingProperty::getRenderPasses = Patch(property, Slot::kGetRenderPasses, &LightingProperty::GetRenderPasses, "BSLightingShaderProperty::GetRenderPasses");

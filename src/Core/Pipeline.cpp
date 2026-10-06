@@ -214,14 +214,33 @@ namespace GWP
 
 	bool Pipeline::WantsCaptureDraw(ObjectRecord& a_record, PassKind a_kind, std::uint32_t a_mode, bool a_started, std::uint32_t a_frame)
 	{
-		if (a_kind != PassKind::kMain || !a_started || !a_record.commandBuffers.load(std::memory_order_relaxed) ||
-			a_record.state.load(std::memory_order_acquire) != ObjectState::kCandidate ||
-			Settings::Get().mode != PipelineMode::kBatch || !BatchingActive() || !CommandBufferObjectsBatchable() ||
-			!_calibration.ModeAllowed(a_kind, a_mode)) {
+		if (!a_record.commandBuffers.load(std::memory_order_relaxed) || a_record.state.load(std::memory_order_acquire) != ObjectState::kCandidate) {
 			return false;
 		}
+		const auto route = [this](CaptureRoute a_route) {
+			_captureRoutes[static_cast<std::size_t>(a_route)].fetch_add(1, std::memory_order_relaxed);
+			return a_route == CaptureRoute::kRouted;
+		};
+		if (a_kind != PassKind::kMain) {
+			return route(CaptureRoute::kShadowPass);
+		}
+		if (!a_started) {
+			return route(CaptureRoute::kWithoutEpoch);
+		}
+		if (Settings::Get().mode != PipelineMode::kBatch) {
+			return route(CaptureRoute::kNotBatchMode);
+		}
+		if (!BatchingActive()) {
+			return route(CaptureRoute::kBatchingInactive);
+		}
+		if (!CommandBufferObjectsBatchable()) {
+			return route(CaptureRoute::kNotBatchable);
+		}
+		if (!_calibration.ModeAllowed(a_kind, a_mode)) {
+			return route(CaptureRoute::kRenderMode);
+		}
 		if (a_record.detachFrame.exchange(a_frame, std::memory_order_relaxed) == a_frame) {
-			return false;  // already routed in another view this frame
+			return route(CaptureRoute::kSameFrame);  // already routed in another view this frame
 		}
 		if (a_record.detachAttempts.load(std::memory_order_relaxed) >= kMaxCaptureAttempts) {
 			// Its draw never reached the capture; leave it to the engine for a while.
@@ -229,16 +248,14 @@ namespace GWP
 			if (a_record.state.compare_exchange_strong(expected, ObjectState::kRejected, std::memory_order_acq_rel)) {
 				std::scoped_lock lock{ a_record.lock };
 				a_record.stableSinceFrame = a_frame;
-				_captureGiveUps.Add();
 			}
-			return false;
+			return route(CaptureRoute::kGaveUp);
 		}
 		if (!_immediatePasses.ReserveCapture(a_frame, kCaptureDrawsPerFrame)) {
-			_captureBudgetSkips.Add();
-			return false;
+			return route(CaptureRoute::kBudget);
 		}
 		a_record.detachAttempts.fetch_add(1, std::memory_order_relaxed);
-		return true;
+		return route(CaptureRoute::kRouted);
 	}
 
 	void Pipeline::DetachAnchorDepthPass(Bucket& a_bucket, RE::BSRenderPass* a_pass)
@@ -400,6 +417,20 @@ namespace GWP
 		const bool started = queue && queue->epoch.load(std::memory_order_relaxed) != 0;
 		(started ? record->startedViewFrame : record->otherQueueFrame).store(frame, std::memory_order_relaxed);
 
+		const auto queueIndex = _accumulators.IndexOf(a_accumulator);
+		auto* const queueStats = _accumulators.At(queueIndex);
+		if (queueStats) {
+			const auto kind = static_cast<std::size_t>(a_kind);
+			queueStats->registrations[kind].fetch_add(1, std::memory_order_relaxed);
+			if (!started) {
+				queueStats->withoutEpoch.fetch_add(1, std::memory_order_relaxed);
+			}
+			if (a_mode < 64) {
+				queueStats->modes[kind].fetch_or(std::uint64_t{ 1 } << a_mode, std::memory_order_relaxed);
+			}
+		}
+		(a_kind == PassKind::kShadow ? record->lastShadowQueue : record->lastMainQueue).store(queueIndex, std::memory_order_relaxed);
+
 		const auto state = record->state.load(std::memory_order_acquire);
 		if (state == ObjectState::kTracking) {
 			UpdateStability(*record, a_geometry, frame);
@@ -480,6 +511,9 @@ namespace GWP
 			tls.lastDecision = Decision::kSuppressed;
 			tls.lastBucket = bucket;
 			_suppressed.Add();
+			if (queueStats) {
+				queueStats->suppressed.fetch_add(1, std::memory_order_relaxed);
+			}
 			return &g_emptyPasses;
 		}
 
@@ -505,6 +539,9 @@ namespace GWP
 			bucket->drawAnomalies.fetch_add(100, std::memory_order_relaxed);
 		}
 		_carriers.Add();
+		if (queueStats) {
+			queueStats->carriers.fetch_add(1, std::memory_order_relaxed);
+		}
 		return passes;
 	}
 
@@ -556,6 +593,9 @@ namespace GWP
 		if (!Ready()) {
 			return;
 		}
+		if (auto* const stats = _accumulators.At(_accumulators.IndexOf(a_accumulator))) {
+			stats->starts.fetch_add(1, std::memory_order_relaxed);
+		}
 		auto* const view = _views.Acquire(a_accumulator);
 		if (!view) {
 			return;
@@ -571,9 +611,13 @@ namespace GWP
 		auto& tls = TLS();
 		if (tls.depth < tls.views.size()) {
 			auto* const view = Ready() ? _views.Find(a_accumulator) : nullptr;
-			tls.views[tls.depth] = { view, view ? view->epoch.load(std::memory_order_acquire) : 0, a_kind };
+			const auto queue = Ready() ? _accumulators.IndexOf(a_accumulator) : AccumulatorStats::kNone;
+			tls.views[tls.depth] = { view, view ? view->epoch.load(std::memory_order_acquire) : 0, a_kind, queue };
 			if (view) {
 				view->finishes.fetch_add(1, std::memory_order_relaxed);
+			}
+			if (auto* const stats = _accumulators.At(queue)) {
+				stats->finishes[static_cast<std::size_t>(a_kind)].fetch_add(1, std::memory_order_relaxed);
 			}
 		}
 		++tls.depth;
@@ -627,6 +671,23 @@ namespace GWP
 		}
 		tls.passGeometry = geometry;
 
+		// Diagnostics: where the passes each accumulator queued are drawn.
+		const bool inFinish = tls.depth > 0 && tls.depth <= tls.views.size();
+		const auto currentQueue = inFinish ? tls.views[tls.depth - 1].queue : AccumulatorStats::kNone;
+		if (auto* const stats = _accumulators.At(currentQueue)) {
+			(IsSurfacePass(a_kind) ? stats->surfaceSetups : stats->utilitySetups).fetch_add(1, std::memory_order_relaxed);
+		}
+		if (const auto* const record = _registry.Find(geometry)) {
+			const auto queued = (IsSurfacePass(a_kind) ? record->lastMainQueue : record->lastShadowQueue).load(std::memory_order_relaxed);
+			if (auto* const stats = _accumulators.At(queued)) {
+				if (!inFinish) {
+					stats->drawnOutside.fetch_add(1, std::memory_order_relaxed);
+				} else if (queued != currentQueue) {
+					stats->drawnElsewhere.fetch_add(1, std::memory_order_relaxed);
+				}
+			}
+		}
+
 		const bool inside = tls.depth > 0 && tls.depth <= tls.views.size() && tls.views[tls.depth - 1].view;
 		const bool renderThread = std::this_thread::get_id() == _renderThread;
 		if (inside) {
@@ -674,6 +735,11 @@ namespace GWP
 		if (!tls.inPass && tls.depth > 0 && std::this_thread::get_id() == _renderThread) {
 			// A draw inside a view without SetupGeometry: replayed from a command buffer.
 			++_replayDraws;
+			if (tls.depth <= tls.views.size()) {
+				if (auto* const stats = _accumulators.At(tls.views[tls.depth - 1].queue)) {
+					stats->replays.fetch_add(1, std::memory_order_relaxed);
+				}
+			}
 			if ((_replayDraws & 15) == 0) {
 				SampleReplayDraw(a_context);
 			}
@@ -741,17 +807,23 @@ namespace GWP
 	{
 		if (a_tls.depth == 0 || a_tls.depth > a_tls.views.size() || !a_tls.views[a_tls.depth - 1].view) {
 			_calibration.SampleAnchorOutsideView();
+			++_anchorOutside;
+			_anchorOutsideDetached += _immediatePasses.IsAnchorPass(a_tls.pass) ? 1 : 0;
 			return false;
 		}
 
 		const auto& frame = a_tls.views[a_tls.depth - 1];
 		auto& view = *frame.view;
 		if (a_bucket.gates[_views.IndexOf(&view)].load(std::memory_order_acquire) != frame.epoch) {
-			return false;  // the batch was not used in this view; the anchor draws itself
+			// The batch was not used in this view; the anchor draws itself.
+			++_anchorNotCarried;
+			_anchorNotCarriedDetached += _immediatePasses.IsAnchorPass(a_tls.pass) ? 1 : 0;
+			return false;
 		}
 
 		if (a_instanceCount != 1) {
 			a_bucket.drawAnomalies.fetch_add(1, std::memory_order_relaxed);
+			++_anchorInstanced;
 			return false;
 		}
 
@@ -775,6 +847,7 @@ namespace GWP
 			view.preparedEpoch = frame.epoch;
 			if (!_batches.PrepareView(a_context, _views.Items(view), frame.epoch, occlusion ? &input : nullptr)) {
 				++_failedDraws;
+				++_anchorPrepareFailed;
 				return false;
 			}
 		}
@@ -786,6 +859,7 @@ namespace GWP
 
 		a_bucket.drawAnomalies.fetch_add(1, std::memory_order_relaxed);
 		++_failedDraws;
+		++_anchorDrawFailed;
 		return false;
 	}
 
@@ -1119,9 +1193,67 @@ namespace GWP
 		logger::info("stats: replayed draws {} (sampled {}: one object {}, several objects {}, unknown {}) | meshes {} in {} vertex buffers, {} at a non-zero buffer offset, {} descriptor mismatches",
 			_replayDraws, _replaySamples, _replayMatched, _replayAmbiguous, _replayUnmatched, _meshMap.size(), _meshVertexBuffers, _meshPooled, _meshDescMismatches);
 		const auto detached = _immediatePasses.TakeStats();
-		logger::info("stats: command buffers detached for captures {}, for anchors {}; drawn {}, anchor passes not drawn {}, rebuilt by the engine {}, lost {} | capture draws deferred {}, given up {}{}",
+		logger::info("stats: command buffers detached for captures {}, for anchors {}; drawn {}, anchor passes not drawn {}, rebuilt by the engine {}, lost {}{}",
 			detached.captures, detached.anchors, detached.drawn, detached.undrawnAnchors, detached.rebuilt, detached.lost,
-			_captureBudgetSkips.Take(), _captureGiveUps.Take(), _immediatePasses.Enabled() ? ""sv : " (off: command-buffer objects are not batched)"sv);
+			_immediatePasses.Enabled() ? ""sv : " (off: command-buffer objects are not batched)"sv);
+
+		const auto routes = [this](CaptureRoute a_route) {
+			return _captureRoutes[static_cast<std::size_t>(a_route)].exchange(0, std::memory_order_relaxed);
+		};
+		logger::info("stats: capture routing of command-buffer candidates: routed {} | not routed: shadow registrations {}, accumulator without StartAccumulating {}, not batch mode {}, batching inactive {}, detaching off {}, render mode {}, already this frame {}, gave up {}, frame budget {}",
+			routes(CaptureRoute::kRouted), routes(CaptureRoute::kShadowPass), routes(CaptureRoute::kWithoutEpoch), routes(CaptureRoute::kNotBatchMode),
+			routes(CaptureRoute::kBatchingInactive), routes(CaptureRoute::kNotBatchable), routes(CaptureRoute::kRenderMode), routes(CaptureRoute::kSameFrame),
+			routes(CaptureRoute::kGaveUp), routes(CaptureRoute::kBudget));
+
+		const auto& buckets = _buckets.Stats();
+		logger::info("stats: anchor draws not replaced: batch not carried in the drawing view {} (passes detached by a carrier {}), outside FinishAccumulating {} (detached by a carrier {}), instanced {}, view preparation failed {}, batch draw failed {} | batches retired so far: detached {}, moved {}, evictions/anomalies {}, merge errors {}",
+			_anchorNotCarried, _anchorNotCarriedDetached, _anchorOutside, _anchorOutsideDetached, _anchorInstanced, _anchorPrepareFailed, _anchorDrawFailed,
+			buckets.retiredDetached, buckets.retiredMoved, buckets.retiredEvictions, buckets.retiredErrors);
+		_anchorNotCarried = 0;
+		_anchorNotCarriedDetached = 0;
+		_anchorOutside = 0;
+		_anchorOutsideDetached = 0;
+		_anchorInstanced = 0;
+		_anchorPrepareFailed = 0;
+		_anchorDrawFailed = 0;
+
+		const auto modeList = [](std::uint64_t a_modes) {
+			std::string list;
+			for (std::uint32_t mode = 0; mode < 64; ++mode) {
+				if ((a_modes >> mode) & 1) {
+					list += fmt::format("{}{}", list.empty() ? "" : ",", mode);
+				}
+			}
+			return list.empty() ? std::string{ "-" } : list;
+		};
+		_accumulators.ForEach([&](std::uint8_t a_index, AccumulatorStats::Slot& a_slot) {
+			const auto take = [](std::atomic<std::uint32_t>& a_counter) { return a_counter.exchange(0, std::memory_order_relaxed); };
+			const auto starts = take(a_slot.starts);
+			const auto finish = take(a_slot.finishes[0]);
+			const auto preResolve = take(a_slot.finishes[1]);
+			const auto postResolve = take(a_slot.finishes[2]);
+			const auto mainRegistrations = take(a_slot.registrations[0]);
+			const auto shadowRegistrations = take(a_slot.registrations[1]);
+			const auto withoutEpoch = take(a_slot.withoutEpoch);
+			const auto mainModes = a_slot.modes[0].exchange(0, std::memory_order_relaxed);
+			const auto shadowModes = a_slot.modes[1].exchange(0, std::memory_order_relaxed);
+			const auto carriers = take(a_slot.carriers);
+			const auto suppressed = take(a_slot.suppressed);
+			const auto surface = take(a_slot.surfaceSetups);
+			const auto utility = take(a_slot.utilitySetups);
+			const auto replays = take(a_slot.replays);
+			const auto outside = take(a_slot.drawnOutside);
+			const auto elsewhere = take(a_slot.drawnElsewhere);
+			if (starts + finish + preResolve + postResolve + mainRegistrations + shadowRegistrations + surface + utility + replays + outside + elsewhere == 0) {
+				return;
+			}
+			const auto vtable = a_slot.vtable.load(std::memory_order_relaxed);
+			const auto name = EngineHooks::ClassName(vtable);
+			logger::info("stats: accumulator #{} {}{} | StartAccumulating {}, FinishAccumulating {}/PreResolveDepth {}/PostResolveDepth {} | registrations main {} (modes {}) shadow {} (modes {}), without StartAccumulating {} | carriers {} suppressed {} | inside its FinishAccumulating: surface setups {}, utility setups {}, replayed draws {} | its objects' setups outside every FinishAccumulating {}, in another accumulator's {}",
+				a_index, name.empty() ? fmt::format("vtable@{:X}", vtable) : std::string{ name }, vtable == EngineHooks::AccumulatorVTable() ? ""sv : " (not the hooked vtable)"sv,
+				starts, finish, preResolve, postResolve, mainRegistrations, modeList(mainModes), shadowRegistrations, modeList(shadowModes), withoutEpoch,
+				carriers, suppressed, surface, utility, replays, outside, elsewhere);
+		});
 		_replayDraws = 0;
 		_replaySamples = 0;
 		_replayMatched = 0;

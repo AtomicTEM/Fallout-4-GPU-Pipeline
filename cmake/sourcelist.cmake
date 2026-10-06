@@ -1,4 +1,5 @@
 set(SOURCES
+	src/Core/AccumulatorStats.h
 	src/Core/Calibration.cpp
 	src/Core/Calibration.h
 	src/Core/Guard.cpp

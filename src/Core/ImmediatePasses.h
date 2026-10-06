@@ -56,6 +56,9 @@ namespace GWP
 		// SetupGeometry and RestoreGeometry) was drawn.
 		void NoteDrawn(const void* a_pass);
 
+		// Render thread: a_pass is an anchor pass a carrier detached this frame.
+		[[nodiscard]] bool IsAnchorPass(const void* a_pass);
+
 		// Render thread, at Present, before view counters are reset: puts every
 		// detached buffer back and checks that detaching works. Also called
 		// after a plugin fault, when no other hook runs any more.

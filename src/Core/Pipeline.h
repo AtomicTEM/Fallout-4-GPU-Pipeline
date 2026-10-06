@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Core/AccumulatorStats.h"
 #include "Core/Calibration.h"
 #include "Core/ImmediatePasses.h"
 #include "Render/BatchRenderer.h"
@@ -86,6 +87,24 @@ namespace GWP
 			ViewState* view{ nullptr };
 			std::uint32_t epoch{ 0 };
 			FinishKind kind{ FinishKind::kFinish };
+			std::uint8_t queue{ AccumulatorStats::kNone };  // diagnostics slot of the accumulator
+		};
+
+		// Why a command-buffer candidate's registration was or was not routed
+		// through SetupGeometry for its capture (diagnostics).
+		enum class CaptureRoute : std::uint32_t
+		{
+			kRouted,
+			kShadowPass,
+			kWithoutEpoch,  // its accumulator's StartAccumulating was never hooked
+			kNotBatchMode,
+			kBatchingInactive,
+			kNotBatchable,
+			kRenderMode,
+			kSameFrame,
+			kGaveUp,
+			kBudget,
+			kCount
 		};
 
 		struct ThreadState
@@ -187,8 +206,16 @@ namespace GWP
 		StripedCounter _suppressed;
 		StripedCounter _carriers;
 		StripedCounter _evictions;
-		StripedCounter _captureBudgetSkips;  // capture draws deferred to a later frame
-		StripedCounter _captureGiveUps;      // candidates whose capture draw never came
+		std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(CaptureRoute::kCount)> _captureRoutes{};
+		AccumulatorStats _accumulators;
+		// What happened to anchor draws that reached DrawBatch (render thread)
+		std::uint64_t _anchorNotCarried{ 0 };          // the batch was not carried in the view drawing it
+		std::uint64_t _anchorNotCarriedDetached{ 0 };  // ... although a carrier detached the pass for another view
+		std::uint64_t _anchorOutside{ 0 };             // drawn outside every hooked FinishAccumulating
+		std::uint64_t _anchorOutsideDetached{ 0 };     // ... although a carrier detached the pass
+		std::uint64_t _anchorInstanced{ 0 };
+		std::uint64_t _anchorPrepareFailed{ 0 };
+		std::uint64_t _anchorDrawFailed{ 0 };
 		// Diagnostics for the stats lines (reset with them): how often tracked
 		// objects were found moved, and one example of a change and of a
 		// transform that matched neither convention.
