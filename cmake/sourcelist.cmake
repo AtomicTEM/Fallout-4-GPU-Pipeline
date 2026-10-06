@@ -2,6 +2,8 @@ set(SOURCES
 	src/Core/AccumulatorStats.h
 	src/Core/Calibration.cpp
 	src/Core/Calibration.h
+	src/Core/CarriedPasses.cpp
+	src/Core/CarriedPasses.h
 	src/Core/Guard.cpp
 	src/Core/Guard.h
 	src/Core/ImmediatePasses.cpp

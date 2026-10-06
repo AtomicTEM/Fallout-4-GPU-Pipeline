@@ -28,11 +28,10 @@ namespace GWP
 		std::atomic<std::uint32_t> finishes{ 0 };
 		std::atomic<std::uint32_t> registrationsBeforeStart{ 0 };
 
-		// main view support
+		// world view support (see Pipeline::PrepareWorldView)
 		std::atomic<bool> hookedStart{ false };              // StartAccumulating reached the vtable hook
 		std::atomic<bool> firstPerson{ false };              // BSShaderAccumulator::firstPerson
 		std::atomic<std::uint32_t> mainRegistrations{ 0 };  // per frame, reset at Present
-		std::atomic<bool> closed{ false };                   // drawn; no batch is carried until the next epoch
 		std::uint32_t lightingSetups{ 0 };       // render thread
 		std::uint32_t utilitySetups{ 0 };        // render thread
 

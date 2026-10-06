@@ -74,7 +74,6 @@ namespace GWP
 		}
 		_triShapeVTable = EngineHooks::TriShapeVTable();
 		_hooksInstalled = true;
-		_mainPassHooked = EngineHooks::InstallMainPassHook();
 
 		if (!D3DHooks::InstallCreateDeviceHooks()) {
 			logger::warn("pipeline: D3D11 device creation imports not found; device hooks will be installed late");
@@ -261,13 +260,22 @@ namespace GWP
 
 	void Pipeline::DetachAnchorDepthPass(Bucket& a_bucket, RE::BSRenderPass* a_pass)
 	{
-		if (!a_pass || !CommandBuffersDetectable() || !Engine::Field<const void*>(a_pass, Engine::Offsets::kPassCommandBuffer)) {
-			return;
-		}
-		if (!_immediatePasses.Detach(a_pass, a_bucket.anchor, ImmediatePasses::Reason::kAnchor, &a_bucket, nullptr, 1)) {
+		auto& tls = TLS();
+		if (a_pass && !PrepareAnchorPasses(a_bucket, a_pass, tls.lastView, tls.lastEpoch, 1)) {
 			a_bucket.retireRequested.store(true, std::memory_order_relaxed);
 			a_bucket.drawAnomalies.fetch_add(100, std::memory_order_relaxed);
 		}
+	}
+
+	bool Pipeline::PrepareAnchorPasses(Bucket& a_bucket, void* a_pass, ViewState* a_view, std::uint32_t a_epoch, std::uint32_t a_maxPasses)
+	{
+		if (!CommandBuffersDetectable()) {
+			return true;  // the pass layout is not confirmed; nothing is batched anyway
+		}
+		if (a_view && !a_view->hookedStart.load(std::memory_order_relaxed)) {
+			_carriedPasses.Add(a_pass, a_bucket.anchor, { a_view, a_epoch, &a_bucket }, a_maxPasses);
+		}
+		return _immediatePasses.Detach(a_pass, a_bucket.anchor, ImmediatePasses::Reason::kAnchor, &a_bucket, a_view, a_maxPasses);
 	}
 
 	bool Pipeline::InspectPasses(ObjectRecord* a_record, const RenderPassArray* a_passes, const RE::BSGeometry* a_geometry) noexcept
@@ -416,7 +424,7 @@ namespace GWP
 		// batched; calibration uses this to judge where the passes are drawn.
 		// Main registrations give their accumulator a view, so the world
 		// accumulator (whose StartAccumulating is never hooked) can become the
-		// main view (PrepareMainView).
+		// world view (PrepareWorldView).
 		auto* const queue = a_kind == PassKind::kMain ? _views.Acquire(a_accumulator) : _views.Find(a_accumulator);
 		if (queue && a_kind == PassKind::kMain) {
 			queue->mainRegistrations.fetch_add(1, std::memory_order_relaxed);
@@ -424,8 +432,12 @@ namespace GWP
 				queue->firstPerson.store(true, std::memory_order_relaxed);
 			}
 		}
-		const bool started = queue && queue->epoch.load(std::memory_order_relaxed) != 0 && !queue->closed.load(std::memory_order_relaxed);
-		(started ? record->startedViewFrame : record->otherQueueFrame).store(frame, std::memory_order_relaxed);
+		const bool started = queue && queue->epoch.load(std::memory_order_relaxed) != 0;
+		// Calibration checks that passes queued in a view with hooked
+		// FinishAccumulating are drawn inside it; the world view's anchor draws
+		// are matched by pass instead (CarriedPasses).
+		const bool hookedView = started && queue->hookedStart.load(std::memory_order_relaxed);
+		(hookedView ? record->startedViewFrame : record->otherQueueFrame).store(frame, std::memory_order_relaxed);
 
 		const auto queueIndex = _accumulators.IndexOf(a_accumulator);
 		auto* const queueStats = _accumulators.At(queueIndex);
@@ -492,10 +504,6 @@ namespace GWP
 			_calibration.SampleRegistrationBeforeStart();
 			return CallNormal(a_original, a_property, a_geometry, a_mode, a_accumulator, record);
 		}
-		if (view->closed.load(std::memory_order_acquire)) {
-			// The view was already drawn: a batch carried now would never be drawn.
-			return CallNormal(a_original, a_property, a_geometry, a_mode, a_accumulator, record);
-		}
 
 		if (!_views.Append(*view, member)) {
 			// The view's list is full. Other members can simply draw themselves,
@@ -536,14 +544,16 @@ namespace GWP
 		tls.lastGeometry = bucket->anchor;
 		tls.lastDecision = Decision::kNormal;
 		tls.lastBucket = bucket;
+		tls.lastView = view;
+		tls.lastEpoch = epoch;
 		auto* const passes = a_original(bucket->anchorProperty, bucket->anchor, a_mode, a_accumulator);
 		auto* const anchorRecord = _registry.Find(bucket->anchor);
 		if (anchorRecord) {
 			// The passes are the anchor's; they are drawn by this accumulator.
 			(a_kind == PassKind::kShadow ? anchorRecord->lastShadowQueue : anchorRecord->lastMainQueue).store(queueIndex, std::memory_order_relaxed);
 		}
-		if (InspectPasses(anchorRecord, passes, bucket->anchor) &&
-			!_immediatePasses.Detach(passes->passList, bucket->anchor, ImmediatePasses::Reason::kAnchor, bucket, view, kMaxPassWalk)) {
+		InspectPasses(anchorRecord, passes, bucket->anchor);
+		if (passes && passes->passList && !PrepareAnchorPasses(*bucket, passes->passList, view, epoch, kMaxPassWalk)) {
 			// The anchor's draw would be replayed from a command buffer and never
 			// reach DrawBatch; stop using this batch.
 			bucket->retireRequested.store(true, std::memory_order_relaxed);
@@ -625,23 +635,6 @@ namespace GWP
 		view->hookedStart.store(true, std::memory_order_relaxed);
 	}
 
-	void Pipeline::OnMainPassBegin()
-	{
-		// Without a main view the window still counts as a draw window, so
-		// nested draws are attributed consistently; it has no view.
-		OnFinishBegin(_mainPassAccumulator.load(std::memory_order_acquire), FinishKind::kDeferredPrePass);
-	}
-
-	void Pipeline::OnMainPassEnd()
-	{
-		auto& tls = TLS();
-		auto* const view = tls.depth > 0 && tls.depth <= tls.views.size() ? tls.views[tls.depth - 1].view : nullptr;
-		OnFinishEnd(nullptr, FinishKind::kDeferredPrePass);
-		if (view) {
-			// Registrations after the G-buffer pass must not suppress members.
-			view->closed.store(true, std::memory_order_release);
-		}
-	}
 
 	void Pipeline::OnFinishBegin(RE::BSShaderAccumulator* a_accumulator, FinishKind a_kind)
 	{
@@ -849,27 +842,38 @@ namespace GWP
 
 	bool Pipeline::DrawBatch(ID3D11DeviceContext* a_context, Bucket& a_bucket, ThreadState& a_tls, UINT a_indexCount, UINT a_instanceCount, UINT a_startIndex, INT a_baseVertex)
 	{
-		if (a_tls.depth == 0 || a_tls.depth > a_tls.views.size() || !a_tls.views[a_tls.depth - 1].view) {
-			_calibration.SampleAnchorOutsideView();
-			++(a_tls.depth == 0 ? _anchorOutside : _anchorNoView);
-			_anchorOutsideDetached += _immediatePasses.IsAnchorPass(a_tls.pass) ? 1 : 0;
-			return false;
-		}
-
-		const auto& frame = a_tls.views[a_tls.depth - 1];
-		if (frame.epoch == 0) {
-			// A view whose StartAccumulating was never seen never carries a
-			// batch (gates start at 0, so the gate test below cannot tell).
-			++_anchorUnstartedView;
+		// The view this draw belongs to: the hooked FinishAccumulating it runs
+		// in, or else the view a carrier returned this pass for (the world
+		// view draws outside every hooked FinishAccumulating).
+		const auto carriedIn = [&](const ViewState* a_view, std::uint32_t a_epoch) {
+			return a_view && a_epoch != 0 && a_bucket.gates[_views.IndexOf(a_view)].load(std::memory_order_acquire) == a_epoch;
+		};
+		const bool inFinish = a_tls.depth > 0 && a_tls.depth <= a_tls.views.size() && a_tls.views[a_tls.depth - 1].view;
+		ViewFrame frame{};
+		if (inFinish && carriedIn(a_tls.views[a_tls.depth - 1].view, a_tls.views[a_tls.depth - 1].epoch)) {
+			frame = a_tls.views[a_tls.depth - 1];
+		} else if (const auto carried = _carriedPasses.Find(a_tls.pass); carried && carried->bucket == &a_bucket && carriedIn(carried->view, carried->epoch)) {
+			frame.view = carried->view;
+			frame.epoch = carried->epoch;
+		} else {
+			// Not carried here: the anchor draws itself, which is right unless a
+			// carrier detached this pass for a view and it is drawn elsewhere.
+			const bool detached = _immediatePasses.IsAnchorPass(a_tls.pass);
+			if (!inFinish) {
+				++(a_tls.depth == 0 ? _anchorOutside : _anchorNoView);
+				_anchorOutsideDetached += detached ? 1 : 0;
+				if (detached) {
+					_calibration.SampleAnchorOutsideView();
+				}
+			} else if (a_tls.views[a_tls.depth - 1].epoch == 0) {
+				++_anchorUnstartedView;
+			} else {
+				++_anchorNotCarried;
+				_anchorNotCarriedDetached += detached ? 1 : 0;
+			}
 			return false;
 		}
 		auto& view = *frame.view;
-		if (a_bucket.gates[_views.IndexOf(&view)].load(std::memory_order_acquire) != frame.epoch) {
-			// The batch was not used in this view; the anchor draws itself.
-			++_anchorNotCarried;
-			_anchorNotCarriedDetached += _immediatePasses.IsAnchorPass(a_tls.pass) ? 1 : 0;
-			return false;
-		}
 
 		if (a_instanceCount != 1) {
 			a_bucket.drawAnomalies.fetch_add(1, std::memory_order_relaxed);
@@ -1080,6 +1084,7 @@ namespace GWP
 		// The frame's passes have been drawn: give back the command buffers
 		// detached from them (before the view counters below are reset).
 		_immediatePasses.ReattachAll();
+		_carriedPasses.EndFrame();
 		if (_immediatePassesEnabled && !_immediatePasses.Enabled()) {
 			// Command-buffer objects can no longer be captured or anchor a batch.
 			_immediatePassesEnabled = false;
@@ -1094,7 +1099,7 @@ namespace GWP
 			});
 		}
 
-		PrepareMainView(a_frame);
+		PrepareWorldView(a_frame);
 
 		// Hotkey: toggle batching for A/B comparisons.
 		if (settings.toggleKey != 0) {
@@ -1151,20 +1156,16 @@ namespace GWP
 		LogStats(a_frame);
 	}
 
-	void Pipeline::PrepareMainView(std::uint32_t a_frame)
+	void Pipeline::PrepareWorldView(std::uint32_t a_frame)
 	{
-		if (!_mainPassHooked) {
-			return;
-		}
-
-		// The main view is the accumulator that queued the most main-view
+		// The world view is the accumulator that queued the most main-view
 		// objects without a hooked StartAccumulating (first person excluded).
 		ViewState* best = nullptr;
 		std::uint32_t bestCount = 0;
 		std::uint32_t currentCount = 0;
 		_views.ForEach([&](ViewState& a_view) {
 			const auto count = a_view.mainRegistrations.exchange(0, std::memory_order_relaxed);
-			if (&a_view == _mainPassView) {
+			if (&a_view == _worldView) {
 				currentCount = count;
 			}
 			if (a_view.hookedStart.load(std::memory_order_relaxed) || a_view.firstPerson.load(std::memory_order_relaxed)) {
@@ -1178,28 +1179,25 @@ namespace GWP
 
 		// Keep the current one unless another clearly queues more; counts jump
 		// in menus, loading screens and cell transitions.
-		auto* chosen = _mainPassView;
+		auto* chosen = _worldView;
 		if (!chosen || chosen->hookedStart.load(std::memory_order_relaxed) || chosen->firstPerson.load(std::memory_order_relaxed) ||
 			(best && bestCount > currentCount * 2 + 64)) {
 			chosen = best;
 		}
-		if (chosen != _mainPassView) {
-			if (_mainPassView) {
-				// The old view has no draw window any more: never carry a batch in it.
-				_mainPassView->closed.store(true, std::memory_order_release);
-				_mainPassView->epoch.store(0, std::memory_order_release);
+		if (chosen != _worldView) {
+			if (_worldView && !_worldView->hookedStart.load(std::memory_order_relaxed)) {
+				// No epoch any more: nothing is carried in it.
+				_worldView->epoch.store(0, std::memory_order_release);
 			}
-			_mainPassView = chosen;
+			_worldView = chosen;
 			const auto* const accumulator = chosen ? chosen->accumulator.load(std::memory_order_acquire) : nullptr;
-			_mainPassAccumulator.store(const_cast<RE::BSShaderAccumulator*>(accumulator), std::memory_order_release);
-			logger::info("pipeline: main view is accumulator #{} ({} main registrations last frame)", _accumulators.IndexOf(accumulator), chosen ? bestCount : 0);
+			logger::info("pipeline: world view is accumulator #{} ({} main registrations last frame)", _accumulators.IndexOf(accumulator), chosen ? bestCount : 0);
 		}
 
-		// Its epoch runs from this Present to the end of the next DeferredPrePass.
-		if (_mainPassView) {
+		// Its epoch runs from this Present to the next.
+		if (_worldView) {
 			const auto capacity = std::max<std::uint32_t>(_buckets.TotalActiveMembers() * 2 + 4096, 4096);
-			_views.Begin(*_mainPassView, capacity, a_frame);
-			_mainPassView->closed.store(false, std::memory_order_release);
+			_views.Begin(*_worldView, capacity, a_frame);
 		}
 	}
 
@@ -1301,6 +1299,9 @@ namespace GWP
 			detached.captures, detached.anchors, detached.drawn, detached.undrawnAnchors, detached.rebuilt, detached.lost,
 			_immediatePasses.Enabled() ? ""sv : " (off: command-buffer objects are not batched)"sv);
 
+		const auto carried = _carriedPasses.TakeStats();
+		logger::info("stats: world view anchor passes carried {}, drawn {}, not drawn {}", carried.carried, carried.drawn, carried.undrawn);
+
 		const auto routes = [this](CaptureRoute a_route) {
 			return _captureRoutes[static_cast<std::size_t>(a_route)].exchange(0, std::memory_order_relaxed);
 		};
@@ -1338,7 +1339,6 @@ namespace GWP
 			const auto finish = take(a_slot.finishes[0]);
 			const auto preResolve = take(a_slot.finishes[1]);
 			const auto postResolve = take(a_slot.finishes[2]);
-			const auto mainPass = take(a_slot.finishes[3]);
 			const auto mainRegistrations = take(a_slot.registrations[0]);
 			const auto shadowRegistrations = take(a_slot.registrations[1]);
 			const auto withoutEpoch = take(a_slot.withoutEpoch);
@@ -1351,14 +1351,14 @@ namespace GWP
 			const auto replays = take(a_slot.replays);
 			const auto outside = take(a_slot.drawnOutside);
 			const auto elsewhere = take(a_slot.drawnElsewhere);
-			if (starts + finish + preResolve + postResolve + mainPass + mainRegistrations + shadowRegistrations + surface + utility + replays + outside + elsewhere == 0) {
+			if (starts + finish + preResolve + postResolve + mainRegistrations + shadowRegistrations + surface + utility + replays + outside + elsewhere == 0) {
 				return;
 			}
 			const auto vtable = a_slot.vtable.load(std::memory_order_relaxed);
 			const auto name = vtable ? EngineHooks::ClassName(vtable) : std::string_view{};
-			logger::info("stats: accumulator #{} {}{} | StartAccumulating {}, FinishAccumulating {}/PreResolveDepth {}/PostResolveDepth {}, DeferredPrePass {} | registrations main {} (modes {}) shadow {} (modes {}), without StartAccumulating {} | carriers {} suppressed {} | inside its draw windows: surface setups {}, utility setups {}, replayed draws {} | its objects' setups outside every draw window {}, in another accumulator's {}",
+			logger::info("stats: accumulator #{} {}{} | StartAccumulating {}, FinishAccumulating {}/PreResolveDepth {}/PostResolveDepth {} | registrations main {} (modes {}) shadow {} (modes {}), without StartAccumulating {} | carriers {} suppressed {} | inside its FinishAccumulating: surface setups {}, utility setups {}, replayed draws {} | its objects' setups outside every FinishAccumulating {}, in another accumulator's {}",
 				a_index, name.empty() ? fmt::format("vtable@{:X}", vtable) : std::string{ name }, vtable == EngineHooks::AccumulatorVTable() ? ""sv : " (not the hooked vtable)"sv,
-				starts, finish, preResolve, postResolve, mainPass, mainRegistrations, modeList(mainModes), shadowRegistrations, modeList(shadowModes), withoutEpoch,
+				starts, finish, preResolve, postResolve, mainRegistrations, modeList(mainModes), shadowRegistrations, modeList(shadowModes), withoutEpoch,
 				carriers, suppressed, surface, utility, replays, outside, elsewhere);
 		});
 		if (const auto untracked = _accumulators.TakeUntracked()) {

@@ -30,18 +30,20 @@ Opaque world geometry is drawn into the G-buffer by `BSDFPrePassShader` and
 into shadow maps by `BSUtilityShader`; `BSLightingShader` only draws forward
 passes.
 
-Shadow-map accumulators follow this sequence through the vtable. The world
-accumulator of the main camera does not: its `StartAccumulating` and
-`FinishAccumulating*` never reach the vtable hooks, and its G-buffer passes
-are drawn inside `DrawWorld::DeferredPrePass`. The plugin therefore treats it
-specially:
+Shadow-map accumulators follow this sequence through the vtable. The main
+camera's world accumulator does not. Its `StartAccumulating` and
+`FinishAccumulating*` never reach the vtable hooks; its G-buffer passes are
+drawn inside `DrawWorld::DeferredPrePass`. The plugin handles this **world
+view** without patching any code:
 
-- the accumulator that queues the most main-view objects without a hooked
-  `StartAccumulating` (first person excluded) is the main view
-- its epoch is opened at `Present`
-- the call to `DrawWorld::DeferredPrePass` in `DrawWorld::Render_PreUI` is
-  wrapped and acts as its `FinishAccumulating`
-- after it, the view is closed: later registrations never carry a batch Every visible object costs a pass registration, the engine's state
+- The world view is the accumulator that queues the most main-view objects
+  without a hooked `StartAccumulating`, first person excluded.
+- Its epoch is opened at `Present`.
+- When a carrier returns the anchor's passes there, they are recorded with the
+  view and epoch (`src/Core/CarriedPasses.*`). The draw of a recorded pass is
+  the draw of its batch in that view, wherever the engine issues it.
+- A recorded pass that is never drawn counts as an anomaly of its batch, so a
+  batch whose members would stay hidden is retired. Every visible object costs a pass registration, the engine's state
 setup and a D3D11 draw, all on the CPU. The plugin keeps the first half (the
 engine still decides which objects exist and are visible) and replaces the
 second half for batched objects.
@@ -91,13 +93,10 @@ All hooks are **vtable patches**:
 - One import-table patch on `Fallout4.exe` (`D3D11CreateDevice*`) sees the
   device before the renderer creates its input layouts.
 
-No raw addresses are used. The only code patch is the call to
-`DrawWorld::DeferredPrePass` in `DrawWorld::Render_PreUI`, found at runtime
-by CommonLibF4RD's call-site search (both IDs from the runtime database) and
-redirected through the F4SE trampoline. If the call cannot be identified, the
-main view is not batched. The only engine data the plugin writes is the
-command buffer pointer of the passes it routes through `SetupGeometry`,
-restored the same frame (see [Command buffers](#command-buffers)).
+No executable code is patched and no raw addresses are used. The only engine
+data the plugin writes is the command buffer pointer of the passes it routes
+through `SetupGeometry`, restored the same frame (see
+[Command buffers](#command-buffers)).
 
 ## 2. Components
 
@@ -108,6 +107,7 @@ restored the same frame (see [Command buffers](#command-buffers)).
 | D3D hooks | `src/Render/D3DHooks.*`, `src/Render/InputLayouts.*` | Device creation, input layout capture, draw interception, Present/Present1 |
 | Orchestration | `src/Core/Pipeline.*` | Receives every hook and owns all subsystems |
 | | `src/Core/ImmediatePasses.*` | Routes passes that would replay a command buffer through `SetupGeometry` for one frame |
+| | `src/Core/CarriedPasses.*` | Matches world-view anchor draws to the view they were carried for |
 | Verification | `src/Core/Calibration.*` | Runtime checks that gate batching |
 | Scene | `src/Scene/ObjectRegistry.*` | Per-geometry state machine |
 | | `src/Scene/ViewRegistry.*` | Per-accumulator epochs and visibility lists |

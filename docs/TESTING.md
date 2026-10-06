@@ -45,8 +45,7 @@ The renderer hooks can only be verified in Fallout 4. Recommended procedure:
 
 1. **Observe first.** Set `[General] iMode=0`, start the game and load a
    save. In `GPUWorldPipeline.log` look for:
-   - `hooks: ... slot ...` lines for all 13 engine hooks, a
-     `hooks: DrawWorld::DeferredPrePass call at ...` line, and
+   - `hooks: ... slot ...` lines for all 13 engine hooks, and
      `d3d: device vtable hooked` (ideally before `pipeline: ready`)
    - `calibration: BSRenderPass geometry pointer at +0x..`
    - `calibration: batching on hold: ...`. In observe mode the plugin still

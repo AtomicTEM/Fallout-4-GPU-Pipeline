@@ -2,6 +2,7 @@
 
 #include "Core/AccumulatorStats.h"
 #include "Core/Calibration.h"
+#include "Core/CarriedPasses.h"
 #include "Core/ImmediatePasses.h"
 #include "Render/BatchRenderer.h"
 #include "Render/HiZ.h"
@@ -30,8 +31,7 @@ namespace GWP
 	{
 		kFinish,
 		kPreResolveDepth,
-		kPostResolveDepth,
-		kDeferredPrePass  // DrawWorld::DeferredPrePass, the main view's draw window
+		kPostResolveDepth
 	};
 
 	using RenderPassArray = RE::BSShaderProperty::RenderPassArray;
@@ -64,10 +64,6 @@ namespace GWP
 		void OnStartAccumulating(RE::BSShaderAccumulator* a_accumulator);
 		void OnFinishBegin(RE::BSShaderAccumulator* a_accumulator, FinishKind a_kind);
 		void OnFinishEnd(RE::BSShaderAccumulator* a_accumulator, FinishKind a_kind);
-		// DrawWorld::DeferredPrePass: the main view's accumulator draws its
-		// G-buffer passes; it is treated like its FinishAccumulating.
-		void OnMainPassBegin();
-		void OnMainPassEnd();
 		void OnSetupGeometry(ShaderKind a_kind, RE::BSRenderPass* a_pass);
 		void OnRestoreGeometry(ShaderKind a_kind, RE::BSRenderPass* a_pass);
 
@@ -126,6 +122,8 @@ namespace GWP
 			RE::BSGeometry* lastGeometry{ nullptr };
 			Decision lastDecision{ Decision::kNormal };
 			Bucket* lastBucket{ nullptr };
+			ViewState* lastView{ nullptr };  // view and epoch of the last carrier
+			std::uint32_t lastEpoch{ 0 };
 
 			std::uint32_t sampleCounter{ 0 };
 		};
@@ -151,6 +149,11 @@ namespace GWP
 		// Routes a batch anchor's depth pass through SetupGeometry, or retires
 		// the batch if that is not possible.
 		void DetachAnchorDepthPass(Bucket& a_bucket, RE::BSRenderPass* a_pass);
+		// Carrier: lets the anchor passes it returns reach DrawBatch. Detaches
+		// their command buffers and, in a view without hooked
+		// FinishAccumulating, records them in _carriedPasses. Returns false if
+		// one would still replay a command buffer.
+		bool PrepareAnchorPasses(Bucket& a_bucket, void* a_pass, ViewState* a_view, std::uint32_t a_epoch, std::uint32_t a_maxPasses);
 		void SampleReplayDraw(ID3D11DeviceContext* a_context);
 		void RebuildMeshMap(std::uint32_t a_frame);
 		void UpdateStability(ObjectRecord& a_record, RE::BSGeometry* a_geometry, std::uint32_t a_frame);
@@ -162,9 +165,9 @@ namespace GWP
 		void BuildHiZ(ID3D11DeviceContext* a_context, ViewState& a_view);
 		[[nodiscard]] static std::optional<bool> DetectReversedZ(const RE::NiCamera* a_camera);
 		void FrameMaintenance(ID3D11DeviceContext* a_context, std::uint32_t a_frame);
-		// Render thread, at Present: picks the main view's accumulator and opens
-		// its epoch for the next frame.
-		void PrepareMainView(std::uint32_t a_frame);
+		// Render thread, at Present: picks the world view and opens its epoch
+		// for the next frame.
+		void PrepareWorldView(std::uint32_t a_frame);
 		void CollectGarbage(std::uint32_t a_frame);
 		void LogStats(std::uint32_t a_frame);
 		void LogObjectDiagnostics();
@@ -185,12 +188,12 @@ namespace GWP
 
 		std::uintptr_t _triShapeVTable{ 0 };
 
-		// Main view: the world accumulator, whose StartAccumulating and
-		// FinishAccumulating never reach the vtable hooks. Its epoch is opened
-		// at Present and its passes are drawn in DrawWorld::DeferredPrePass.
-		bool _mainPassHooked{ false };
-		std::atomic<RE::BSShaderAccumulator*> _mainPassAccumulator{ nullptr };
-		ViewState* _mainPassView{ nullptr };  // render thread
+		// World view: the main camera's accumulator. Its StartAccumulating and
+		// FinishAccumulating never reach the vtable hooks (it draws inside
+		// DrawWorld::DeferredPrePass), so its epoch is opened at Present and
+		// its anchor draws are matched through _carriedPasses.
+		ViewState* _worldView{ nullptr };  // render thread
+		CarriedPasses _carriedPasses;
 
 		ID3D11Device* _device{ nullptr };
 		Microsoft::WRL::ComPtr<ID3D11DeviceContext> _immediate;
