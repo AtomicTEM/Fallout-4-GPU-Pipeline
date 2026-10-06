@@ -13,9 +13,16 @@ namespace GWP
 {
 	enum class ShaderKind : std::uint32_t
 	{
-		kLighting,  // BSLightingShader: G-buffer / forward passes
-		kUtility    // BSUtilityShader: depth-only, shadow map and mask passes
+		kLighting,  // BSLightingShader: forward passes
+		kUtility,   // BSUtilityShader: depth-only, shadow map and mask passes
+		kPrePass    // BSDFPrePassShader: deferred G-buffer passes (most world geometry)
 	};
+
+	// Passes that draw an object's surface (as opposed to depth or shadows).
+	[[nodiscard]] constexpr bool IsSurfacePass(ShaderKind a_kind) noexcept
+	{
+		return a_kind != ShaderKind::kUtility;
+	}
 
 	enum class FinishKind : std::uint32_t
 	{
@@ -99,7 +106,14 @@ namespace GWP
 
 		[[nodiscard]] static bool QuickEligible(RE::BSGeometry* a_geometry) noexcept;
 		[[nodiscard]] ObjectRecord* Track(RE::BSGeometry* a_geometry, std::uint32_t a_frame);
-		[[nodiscard]] RenderPassArray* CallNormal(GetRenderPasses_t a_original, RE::BSShaderProperty* a_property, RE::BSGeometry* a_geometry, std::uint32_t a_mode, RE::BSShaderAccumulator* a_accumulator);
+		[[nodiscard]] RenderPassArray* CallNormal(GetRenderPasses_t a_original, RE::BSShaderProperty* a_property, RE::BSGeometry* a_geometry, std::uint32_t a_mode, RE::BSShaderAccumulator* a_accumulator, ObjectRecord* a_record = nullptr);
+		// Walks the passes the engine returned for a_geometry: records shader
+		// statistics and whether any pass replays a command buffer. Returns true
+		// if one does.
+		bool InspectPasses(ObjectRecord* a_record, const RenderPassArray* a_passes, const RE::BSGeometry* a_geometry) noexcept;
+		[[nodiscard]] bool CommandBuffersDetectable() const noexcept;
+		void SampleReplayDraw(ID3D11DeviceContext* a_context);
+		void RebuildMeshMap(std::uint32_t a_frame);
 		void UpdateStability(ObjectRecord& a_record, RE::BSGeometry* a_geometry, std::uint32_t a_frame);
 		void Evict(ObjectRecord& a_record, std::uint32_t a_frame);
 		[[nodiscard]] bool Fading(RE::BSGeometry* a_geometry) const noexcept;
@@ -177,6 +191,32 @@ namespace GWP
 		SpinLock _exampleLock;
 		std::optional<TransformChange> _changeExample;   // _exampleLock
 		std::optional<TransformMismatch> _mismatchExample;  // render thread
+		// command-buffer diagnostics (any thread unless noted; reset with the stats)
+		std::atomic<std::uint64_t> _passesInspected{ 0 };
+		std::atomic<std::uint64_t> _passesWithCommandBuffer{ 0 };
+		std::atomic<std::uint64_t> _passWalkMismatches{ 0 };
+		std::array<std::atomic<std::uint64_t>, 4> _passShaders{};  // prepass, lighting, utility, other
+		std::array<std::atomic<std::uintptr_t>, 4> _otherShaderVTables{};
+		std::uint64_t _replayDraws{ 0 };       // render thread
+		std::uint64_t _replaySamples{ 0 };     // render thread
+		std::uint64_t _replayMatched{ 0 };     // render thread
+		std::uint64_t _replayAmbiguous{ 0 };   // render thread
+		std::uint64_t _replayUnmatched{ 0 };   // render thread
+
+		// (vertex buffer, index buffer) -> number of recently drawn objects
+		// using them; render thread, rebuilt periodically.
+		struct MeshKeyHash
+		{
+			std::size_t operator()(const std::pair<void*, void*>& a_key) const noexcept
+			{
+				return std::hash<void*>{}(a_key.first) ^ (std::hash<void*>{}(a_key.second) << 1);
+			}
+		};
+		std::unordered_map<std::pair<void*, void*>, std::uint32_t, MeshKeyHash> _meshMap;
+		std::uint32_t _meshVertexBuffers{ 0 };
+		std::uint32_t _meshPooled{ 0 };
+		std::uint32_t _meshDescMismatches{ 0 };
+
 		std::uint64_t _lightingDraws{ 0 };           // render thread
 		std::uint64_t _utilityDraws{ 0 };            // render thread
 		std::uint64_t _transformSamplesAll{ 0 };     // render thread

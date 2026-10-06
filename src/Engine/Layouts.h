@@ -30,6 +30,22 @@ namespace GWP::Engine
 		inline constexpr std::size_t kAlphaFlags = 0x28;
 		inline constexpr std::size_t kAlphaThreshold = 0x2A;
 
+		// BSRenderPass (size 0x58). From Dear-Modding-FO4/commonlibf4
+		// (RE/B/BSRenderPass.h); the geometry offset is confirmed at runtime by
+		// Calibration, which learns it independently.
+		inline constexpr std::size_t kPassCommandBuffer = 0x00;  // recorded draw replayed without SetupGeometry
+		inline constexpr std::size_t kPassShader = 0x08;
+		inline constexpr std::size_t kPassGeometry = 0x18;
+		inline constexpr std::size_t kPassPropertyNext = 0x38;  // next pass owned by the same property
+
+		// BSGraphics::TriShape (renderer data of a BSTriShape) and
+		// BSGraphics::Buffer, from the same source (RE/B/BSGraphics.h).
+		inline constexpr std::size_t kTriShapeVertexDesc = 0x00;
+		inline constexpr std::size_t kTriShapeVertexBuffer = 0x08;
+		inline constexpr std::size_t kTriShapeIndexBuffer = 0x10;
+		inline constexpr std::size_t kBufferD3D = 0x00;  // ID3D11Buffer*
+		inline constexpr std::size_t kBufferDataOffset = 0x48;
+
 		// NiCamera : NiAVObject (size 0x1A0)
 		inline constexpr std::size_t kCameraWorldToCam = 0x120;  // float[4][4], row-major, absolute world space
 		inline constexpr std::size_t kCameraFrustumNear = 0x170;
@@ -116,6 +132,36 @@ namespace GWP::Engine
 		[[nodiscard]] static std::uint16_t NumVertices(const RE::BSGeometry* a_triShape) noexcept
 		{
 			return Field<std::uint16_t>(a_triShape, Offsets::kTriShapeNumVertices);
+		}
+	};
+
+	// The D3D11 buffers a BSTriShape draws from, read through its renderer data.
+	struct MeshBuffers
+	{
+		void* vertexBuffer{ nullptr };  // ID3D11Buffer*
+		void* indexBuffer{ nullptr };   // ID3D11Buffer*
+		std::uint32_t vertexOffset{ 0 };
+		std::uint32_t indexOffset{ 0 };
+		bool descMatches{ false };  // the renderer data's vertex descriptor equals the geometry's
+
+		// The geometry must be alive (e.g. inside a hook that received it).
+		[[nodiscard]] static MeshBuffers Read(const RE::BSGeometry* a_geometry) noexcept
+		{
+			MeshBuffers result;
+			const auto* const triShape = Geometry::RendererData(a_geometry);
+			if (!triShape) {
+				return result;
+			}
+			result.descMatches = Field<std::uint64_t>(triShape, Offsets::kTriShapeVertexDesc) == Geometry::VertexDesc(a_geometry);
+			if (const auto* const vertices = Field<const void*>(triShape, Offsets::kTriShapeVertexBuffer)) {
+				result.vertexBuffer = Field<void*>(vertices, Offsets::kBufferD3D);
+				result.vertexOffset = Field<std::uint32_t>(vertices, Offsets::kBufferDataOffset);
+			}
+			if (const auto* const indices = Field<const void*>(triShape, Offsets::kTriShapeIndexBuffer)) {
+				result.indexBuffer = Field<void*>(indices, Offsets::kBufferD3D);
+				result.indexOffset = Field<std::uint32_t>(indices, Offsets::kBufferDataOffset);
+			}
+			return result;
 		}
 	};
 

@@ -187,6 +187,63 @@ namespace GWP
 		_evictions.Add();
 	}
 
+	bool Pipeline::CommandBuffersDetectable() const noexcept
+	{
+		// The pass walk relies on the NG/AE BSRenderPass layout; calibration
+		// confirms it by finding the geometry pointer where that layout has it.
+		const auto offset = _calibration.PassGeometryOffset();
+		return offset && *offset == Engine::Offsets::kPassGeometry;
+	}
+
+	bool Pipeline::InspectPasses(ObjectRecord* a_record, const RenderPassArray* a_passes, const RE::BSGeometry* a_geometry) noexcept
+	{
+		if (!a_passes || !a_passes->passList || !CommandBuffersDetectable()) {
+			return false;
+		}
+
+		const auto& shaders = EngineHooks::HookedShaderVTables();
+		bool commandBuffer = false;
+		const void* pass = a_passes->passList;
+		for (std::uint32_t i = 0; pass && i < 16; ++i) {
+			if (Engine::Field<const RE::BSGeometry*>(pass, Engine::Offsets::kPassGeometry) != a_geometry) {
+				_passWalkMismatches.fetch_add(1, std::memory_order_relaxed);
+				break;
+			}
+			_passesInspected.fetch_add(1, std::memory_order_relaxed);
+			if (Engine::Field<const void*>(pass, Engine::Offsets::kPassCommandBuffer)) {
+				commandBuffer = true;
+				_passesWithCommandBuffer.fetch_add(1, std::memory_order_relaxed);
+			}
+
+			const auto vtable = Engine::VTableOf(Engine::Field<const void*>(pass, Engine::Offsets::kPassShader));
+			std::size_t kind = 3;
+			if (vtable && vtable == shaders.prePass) {
+				kind = 0;
+			} else if (vtable && vtable == shaders.lighting) {
+				kind = 1;
+			} else if (vtable && vtable == shaders.utility) {
+				kind = 2;
+			} else if (vtable) {
+				for (auto& slot : _otherShaderVTables) {
+					auto current = slot.load(std::memory_order_relaxed);
+					if (current == vtable || (current == 0 && slot.compare_exchange_strong(current, vtable, std::memory_order_relaxed))) {
+						break;
+					}
+					if (current == vtable) {
+						break;
+					}
+				}
+			}
+			_passShaders[kind].fetch_add(1, std::memory_order_relaxed);
+			pass = Engine::Field<const void*>(pass, Engine::Offsets::kPassPropertyNext);
+		}
+
+		if (commandBuffer && a_record) {
+			a_record->commandBuffers.store(true, std::memory_order_relaxed);
+		}
+		return commandBuffer;
+	}
+
 	void Pipeline::UpdateStability(ObjectRecord& a_record, RE::BSGeometry* a_geometry, std::uint32_t a_frame)
 	{
 		if (!a_record.lock.try_lock()) {
@@ -214,6 +271,17 @@ namespace GWP
 			return;
 		}
 
+		// Objects drawn from command buffers cannot be batched yet: their draws
+		// bypass SetupGeometry, so a batch anchored on one would never be drawn.
+		if (!CommandBuffersDetectable()) {
+			return;
+		}
+		if (a_record.commandBuffers.load(std::memory_order_relaxed)) {
+			auto expected = ObjectState::kTracking;
+			a_record.state.compare_exchange_strong(expected, ObjectState::kRejected, std::memory_order_acq_rel);
+			return;
+		}
+
 		a_record.worldBound = object->worldBound;
 		a_record.numVertices = Engine::Geometry::NumVertices(a_geometry);
 		a_record.numTriangles = Engine::Geometry::NumTriangles(a_geometry);
@@ -226,7 +294,7 @@ namespace GWP
 		}
 	}
 
-	RenderPassArray* Pipeline::CallNormal(GetRenderPasses_t a_original, RE::BSShaderProperty* a_property, RE::BSGeometry* a_geometry, std::uint32_t a_mode, RE::BSShaderAccumulator* a_accumulator)
+	RenderPassArray* Pipeline::CallNormal(GetRenderPasses_t a_original, RE::BSShaderProperty* a_property, RE::BSGeometry* a_geometry, std::uint32_t a_mode, RE::BSShaderAccumulator* a_accumulator, ObjectRecord* a_record)
 	{
 		auto& tls = TLS();
 		tls.lastGeometry = a_geometry;
@@ -237,6 +305,7 @@ namespace GWP
 		if (passes && passes->passList && (!_calibration.PassGeometryOffset() || (++tls.sampleCounter & 15) == 0)) {
 			_calibration.SamplePass(passes->passList, a_geometry);
 		}
+		InspectPasses(a_record, passes, a_geometry);
 
 		tls.lastGeometry = a_geometry;
 		tls.lastDecision = Decision::kNormal;
@@ -287,14 +356,14 @@ namespace GWP
 			member = anchored->firstMember;
 		}
 		if (!bucket || bucket->state.load(std::memory_order_acquire) != BucketState::kActive) {
-			return CallNormal(a_original, a_property, a_geometry, a_mode, a_accumulator);
+			return CallNormal(a_original, a_property, a_geometry, a_mode, a_accumulator, record);
 		}
 
 		// Is batching enabled for this kind of view?
 		const auto& settings = Settings::Get();
 		const bool viewKindEnabled = a_kind == PassKind::kShadow ? settings.batchShadows : (settings.batchMainView && _calibration.MainViewAllowed());
 		if (!BatchingActive() || !viewKindEnabled || !_calibration.ModeAllowed(a_kind, a_mode) || Fading(bucket->anchor)) {
-			return CallNormal(a_original, a_property, a_geometry, a_mode, a_accumulator);
+			return CallNormal(a_original, a_property, a_geometry, a_mode, a_accumulator, record);
 		}
 
 		const bool isAnchor = a_geometry == bucket->anchor;
@@ -304,10 +373,10 @@ namespace GWP
 				if (state == ObjectState::kMember) {
 					Evict(*record, frame);
 				}
-				return CallNormal(a_original, a_property, a_geometry, a_mode, a_accumulator);
+				return CallNormal(a_original, a_property, a_geometry, a_mode, a_accumulator, record);
 			}
 			if (Fading(a_geometry)) {
-				return CallNormal(a_original, a_property, a_geometry, a_mode, a_accumulator);
+				return CallNormal(a_original, a_property, a_geometry, a_mode, a_accumulator, record);
 			}
 		} else if (!Math::NearlyEqual(Engine::AsAVObject(a_geometry)->world, bucket->anchorWorld)) {
 			bucket->retireRequested.store(true, std::memory_order_relaxed);
@@ -318,7 +387,7 @@ namespace GWP
 		if (epoch == 0) {
 			// StartAccumulating was never seen for this accumulator: no batching in it.
 			_calibration.SampleRegistrationBeforeStart();
-			return CallNormal(a_original, a_property, a_geometry, a_mode, a_accumulator);
+			return CallNormal(a_original, a_property, a_geometry, a_mode, a_accumulator, record);
 		}
 
 		if (!_views.Append(*view, member)) {
@@ -326,7 +395,7 @@ namespace GWP
 			// but the anchor must still pass the gate so its passes are never
 			// registered twice; retire the batch so this cannot repeat.
 			if (!isAnchor) {
-				return CallNormal(a_original, a_property, a_geometry, a_mode, a_accumulator);
+				return CallNormal(a_original, a_property, a_geometry, a_mode, a_accumulator, record);
 			}
 			bucket->drawAnomalies.fetch_add(100, std::memory_order_relaxed);
 		}
@@ -357,6 +426,12 @@ namespace GWP
 		tls.lastGeometry = bucket->anchor;
 		tls.lastDecision = Decision::kNormal;
 		auto* const passes = a_original(bucket->anchorProperty, bucket->anchor, a_mode, a_accumulator);
+		if (InspectPasses(_registry.Find(bucket->anchor), passes, bucket->anchor)) {
+			// The anchor's draw would be replayed from a command buffer and never
+			// reach DrawBatch; stop using this batch.
+			bucket->retireRequested.store(true, std::memory_order_relaxed);
+			bucket->drawAnomalies.fetch_add(100, std::memory_order_relaxed);
+		}
 
 		tls.lastGeometry = a_geometry;
 		tls.lastDecision = isAnchor ? Decision::kNormal : Decision::kCarrier;
@@ -502,7 +577,7 @@ namespace GWP
 		}
 		if (inside) {
 			auto* const view = tls.views[tls.depth - 1].view;
-			if (a_kind == ShaderKind::kLighting) {
+			if (IsSurfacePass(a_kind)) {
 				++view->lightingSetups;
 			} else {
 				++view->utilitySetups;
@@ -526,12 +601,19 @@ namespace GWP
 	bool Pipeline::OnDrawIndexed(ID3D11DeviceContext* a_context, UINT a_indexCount, UINT a_instanceCount, UINT a_startIndex, INT a_baseVertex, UINT, bool)
 	{
 		auto& tls = TLS();
+		if (!tls.inPass && tls.depth > 0 && std::this_thread::get_id() == _renderThread) {
+			// A draw inside a view without SetupGeometry: replayed from a command buffer.
+			++_replayDraws;
+			if ((_replayDraws & 15) == 0) {
+				SampleReplayDraw(a_context);
+			}
+		}
 		if (!tls.inPass || !tls.passGeometry || tls.passDrawn) {
 			return false;
 		}
 		tls.passDrawn = true;
 		_calibration.SampleObservedDraw();
-		++(tls.passShader == ShaderKind::kLighting ? _lightingDraws : _utilityDraws);
+		++(IsSurfacePass(tls.passShader) ? _lightingDraws : _utilityDraws);
 
 		auto* const geometry = tls.passGeometry;
 		const bool batchMode = Settings::Get().mode == PipelineMode::kBatch;
@@ -558,7 +640,9 @@ namespace GWP
 				const bool transposed = TransformMatches(object->world, model, object->worldBound, true);
 				const auto* const record = _registry.Find(geometry);
 				const auto state = record ? record->state.load(std::memory_order_acquire) : ObjectState::kTracking;
-				const bool stable = state == ObjectState::kCandidate || state == ObjectState::kCaptured || state == ObjectState::kMember;
+				// Rejected objects (e.g. drawn from command buffers) are rejected once
+				// stable, so they are valid samples too.
+				const bool stable = state == ObjectState::kCandidate || state == ObjectState::kCaptured || state == ObjectState::kMember || state == ObjectState::kRejected;
 				if (stable) {
 					_calibration.SampleTransform(rowMajor, transposed);
 				}
@@ -572,7 +656,7 @@ namespace GWP
 		}
 
 		// Otherwise capture the engine's buffers for objects waiting to be merged.
-		if (batchMode && tls.passShader == ShaderKind::kLighting) {
+		if (batchMode && IsSurfacePass(tls.passShader)) {
 			auto* const record = _registry.Find(geometry);
 			if (record && record->state.load(std::memory_order_acquire) == ObjectState::kCandidate && record->Matches(geometry)) {
 				Capture(a_context, *record, a_indexCount, a_instanceCount, a_startIndex, a_baseVertex);
@@ -836,6 +920,7 @@ namespace GWP
 
 		if (a_frame % kGarbageInterval == 0) {
 			CollectGarbage(a_frame);
+			RebuildMeshMap(a_frame);
 		}
 		_registry.Recycle(a_frame);
 		_views.Collect(a_frame);
@@ -861,14 +946,57 @@ namespace GWP
 		}
 	}
 
+	void Pipeline::SampleReplayDraw(ID3D11DeviceContext* a_context)
+	{
+		Microsoft::WRL::ComPtr<ID3D11Buffer> vertexBuffer;
+		Microsoft::WRL::ComPtr<ID3D11Buffer> indexBuffer;
+		UINT stride{};
+		UINT offset{};
+		DXGI_FORMAT format{};
+		a_context->IAGetVertexBuffers(0, 1, vertexBuffer.GetAddressOf(), &stride, &offset);
+		a_context->IAGetIndexBuffer(indexBuffer.GetAddressOf(), &format, &offset);
+
+		++_replaySamples;
+		const auto it = _meshMap.find({ vertexBuffer.Get(), indexBuffer.Get() });
+		if (it == _meshMap.end()) {
+			++_replayUnmatched;
+		} else if (it->second == 1) {
+			++_replayMatched;
+		} else {
+			++_replayAmbiguous;
+		}
+	}
+
+	void Pipeline::RebuildMeshMap(std::uint32_t a_frame)
+	{
+		_meshMap.clear();
+		std::unordered_set<void*> vertexBuffers;
+		std::uint32_t pooled = 0;
+		std::uint32_t descMismatches = 0;
+		_registry.ForEach([&](ObjectRecord& a_record) {
+			if (a_record.lastSeenFrame.load(std::memory_order_relaxed) + 2 < a_frame || !a_record.mesh.vertexBuffer) {
+				return;
+			}
+			++_meshMap[{ a_record.mesh.vertexBuffer, a_record.mesh.indexBuffer }];
+			vertexBuffers.insert(a_record.mesh.vertexBuffer);
+			pooled += a_record.mesh.vertexOffset != 0 || a_record.mesh.indexOffset != 0 ? 1 : 0;
+			descMismatches += a_record.mesh.descMatches ? 0 : 1;
+		});
+		_meshVertexBuffers = static_cast<std::uint32_t>(vertexBuffers.size());
+		_meshPooled = pooled;
+		_meshDescMismatches = descMismatches;
+	}
+
 	void Pipeline::LogObjectDiagnostics()
 	{
 		std::array<std::uint32_t, 6> states{};
+		std::uint32_t commandBufferObjects = 0;
 		_registry.ForEach([&](ObjectRecord& a_record) {
 			const auto state = static_cast<std::size_t>(a_record.state.load(std::memory_order_relaxed));
 			if (state < states.size()) {
 				++states[state];
 			}
+			commandBufferObjects += a_record.commandBuffers.load(std::memory_order_relaxed) ? 1 : 0;
 		});
 		logger::info("stats: objects tracking {}, stable {}, captured {}, members {}, rejected {} | stability checks {}, found moved {}, became stable {} | draws lighting {}, utility {} | transform samples {} ({} matched)",
 			states[static_cast<std::size_t>(ObjectState::kTracking)], states[static_cast<std::size_t>(ObjectState::kCandidate)], states[static_cast<std::size_t>(ObjectState::kCaptured)],
@@ -878,6 +1006,26 @@ namespace GWP
 		_lightingDraws = 0;
 		_utilityDraws = 0;
 		_transformSamplesAll = 0;
+
+		std::string others;
+		for (const auto& slot : _otherShaderVTables) {
+			if (const auto vtable = slot.load(std::memory_order_relaxed)) {
+				const auto name = EngineHooks::ClassName(vtable);
+				others += fmt::format(" {}", name.empty() ? fmt::format("vtable@{:X}", vtable) : std::string{ name });
+			}
+		}
+		logger::info("stats: passes {} ({} replay a command buffer, {} walk mismatches) | shaders: prepass {}, lighting {}, utility {}, other {}{} | objects drawn from command buffers {}{}",
+			_passesInspected.exchange(0, std::memory_order_relaxed), _passesWithCommandBuffer.exchange(0, std::memory_order_relaxed), _passWalkMismatches.exchange(0, std::memory_order_relaxed),
+			_passShaders[0].exchange(0, std::memory_order_relaxed), _passShaders[1].exchange(0, std::memory_order_relaxed), _passShaders[2].exchange(0, std::memory_order_relaxed),
+			_passShaders[3].exchange(0, std::memory_order_relaxed), others.empty() ? std::string{} : fmt::format(" [{} ]", others),
+			commandBufferObjects, CommandBuffersDetectable() ? ""sv : " (pass layout unconfirmed: nothing is batched)"sv);
+		logger::info("stats: replayed draws {} (sampled {}: one object {}, several objects {}, unknown {}) | meshes {} in {} vertex buffers, {} at a non-zero buffer offset, {} descriptor mismatches",
+			_replayDraws, _replaySamples, _replayMatched, _replayAmbiguous, _replayUnmatched, _meshMap.size(), _meshVertexBuffers, _meshPooled, _meshDescMismatches);
+		_replayDraws = 0;
+		_replaySamples = 0;
+		_replayMatched = 0;
+		_replayAmbiguous = 0;
+		_replayUnmatched = 0;
 		_transformMatchesAll = 0;
 
 		const auto format = [](const RE::NiTransform& a_transform) {

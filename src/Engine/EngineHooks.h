@@ -22,11 +22,23 @@ namespace GWP::EngineHooks
 	}
 
 	// Patches the vtables of BSLightingShaderProperty, BSLightingShader,
-	// BSUtilityShader and BSShaderAccumulator. Only vtable entries are
+	// BSUtilityShader, BSDFPrePassShader and BSShaderAccumulator. Only vtable entries are
 	// replaced; no code bytes are modified. Returns false (and installs
 	// nothing) if any vtable cannot be resolved.
 	bool Install();
 
 	// Primary vtable of BSTriShape, used to recognise plain triangle shapes.
 	[[nodiscard]] std::uintptr_t TriShapeVTable() noexcept;
+
+	// RTTI class name (".?AVName@@") of a vtable in Fallout4.exe, or empty.
+	[[nodiscard]] std::string_view ClassName(std::uintptr_t a_vtable) noexcept;
+
+	// Primary vtables of the hooked shaders (0 if not hooked).
+	struct ShaderVTables
+	{
+		std::uintptr_t lighting{ 0 };
+		std::uintptr_t utility{ 0 };
+		std::uintptr_t prePass{ 0 };
+	};
+	[[nodiscard]] const ShaderVTables& HookedShaderVTables() noexcept;
 }

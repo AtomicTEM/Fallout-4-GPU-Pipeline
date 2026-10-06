@@ -31,11 +31,43 @@ namespace GWP::EngineHooks
 			return fields[0] == 1 && fields[1] == 0;  // x64 signature, offset
 		}
 
+		// MSVC RTTI type name of a vtable's class (".?AVName@@"), read through
+		// its complete object locator; empty if anything lies outside the image.
+		[[nodiscard]] std::string_view RTTIName(std::uintptr_t a_vtable) noexcept
+		{
+			const auto& module = REL::Module::get();
+			const auto base = module.base();
+			const auto end = base + module.image_size();
+			const auto inImage = [&](std::uintptr_t a_address, std::size_t a_size) { return a_address >= base && a_address + a_size <= end; };
+
+			constexpr auto kPointer = sizeof(std::uintptr_t);
+			if (!inImage(a_vtable - kPointer, kPointer)) {
+				return {};
+			}
+			const auto locator = *reinterpret_cast<const std::uintptr_t*>(a_vtable - kPointer);
+			if (!inImage(locator, 0x18)) {
+				return {};
+			}
+			const auto typeDescriptor = base + *reinterpret_cast<const std::uint32_t*>(locator + 0x0C);
+			constexpr std::size_t kNameOffset = 0x10;
+			constexpr std::size_t kMaxName = 128;
+			if (!inImage(typeDescriptor + kNameOffset, 1)) {
+				return {};
+			}
+			const auto* const name = reinterpret_cast<const char*>(typeDescriptor + kNameOffset);
+			const auto available = std::min<std::size_t>(kMaxName, end - (typeDescriptor + kNameOffset));
+			const auto length = ::strnlen(name, available);
+			return length < available ? std::string_view{ name, length } : std::string_view{};
+		}
+
 		// Resolves without REL::Relocation's fatal error path, so a missing or
 		// outdated runtime database disables the plugin instead of the game.
+		// The vtable's RTTI name must match the class, so a wrong ID can never
+		// put a hook on another class.
 		template <std::size_t N>
 		[[nodiscard]] std::uintptr_t PrimaryVTable(const std::array<REL::ID, N>& a_ids, std::string_view a_name)
 		{
+			const auto expected = fmt::format(".?AV{}@@", a_name);
 			for (const auto& id : a_ids) {
 				const auto result = REL::IDDatabase::get().resolve(id);
 				if (!result) {
@@ -43,15 +75,24 @@ namespace GWP::EngineHooks
 					continue;
 				}
 				const auto address = REL::Module::get().base() + *result.rva;
-				if (IsPrimaryVTable(address)) {
-					return address;
+				if (!IsPrimaryVTable(address)) {
+					continue;
 				}
+				const auto name = RTTIName(address);
+				if (name.empty()) {
+					logger::warn("hooks: RTTI name of the {} vtable could not be read", a_name);
+				} else if (name != expected) {
+					logger::error("hooks: vtable for {} belongs to {}", a_name, name);
+					continue;
+				}
+				return address;
 			}
 			logger::error("hooks: no primary vtable found for {}", a_name);
 			return 0;
 		}
 
 		std::uintptr_t g_triShapeVTable{ 0 };
+		ShaderVTables g_shaderVTables;
 
 		template <class F>
 		F Patch(std::uintptr_t a_vtable, std::size_t a_slot, F a_hook, std::string_view a_name)
@@ -140,18 +181,31 @@ namespace GWP::EngineHooks
 		return g_triShapeVTable;
 	}
 
+	std::string_view ClassName(std::uintptr_t a_vtable) noexcept
+	{
+		return RTTIName(a_vtable);
+	}
+
+	const ShaderVTables& HookedShaderVTables() noexcept
+	{
+		return g_shaderVTables;
+	}
+
 	bool Install()
 	{
 		const auto triShape = PrimaryVTable(RE::VTABLE::BSTriShape, "BSTriShape");
 		const auto property = PrimaryVTable(RE::VTABLE::BSLightingShaderProperty, "BSLightingShaderProperty");
 		const auto lighting = PrimaryVTable(RE::VTABLE::BSLightingShader, "BSLightingShader");
 		const auto utility = PrimaryVTable(RE::VTABLE::BSUtilityShader, "BSUtilityShader");
+		// Optional: without it only forward-lit objects can be batched.
+		const auto prePass = PrimaryVTable(RE::VTABLE::BSDFPrePassShader, "BSDFPrePassShader");
 		const auto accumulator = PrimaryVTable(RE::VTABLE::BSShaderAccumulator, "BSShaderAccumulator");
 		if (!triShape || !property || !lighting || !utility || !accumulator) {
 			logger::critical("hooks: required vtables missing, plugin inactive (is Data/F4SE/Plugins/f4rd-runtime.bin installed?)");
 			return false;
 		}
 		g_triShapeVTable = triShape;
+		g_shaderVTables = { lighting, utility, prePass };
 
 		LightingProperty::getRenderPasses = Patch(property, Slot::kGetRenderPasses, &LightingProperty::GetRenderPasses, "BSLightingShaderProperty::GetRenderPasses");
 		LightingProperty::getRenderPassesShadowMapOrMask = Patch(property, Slot::kGetRenderPassesShadowMapOrMask, &LightingProperty::GetRenderPassesShadowMapOrMask, "BSLightingShaderProperty::GetRenderPasses_ShadowMapOrMask");
@@ -161,6 +215,12 @@ namespace GWP::EngineHooks
 		Shader<ShaderKind::kLighting>::restoreGeometry = Patch(lighting, Slot::kRestoreGeometry, &Shader<ShaderKind::kLighting>::RestoreGeometry, "BSLightingShader::RestoreGeometry");
 		Shader<ShaderKind::kUtility>::setupGeometry = Patch(utility, Slot::kSetupGeometry, &Shader<ShaderKind::kUtility>::SetupGeometry, "BSUtilityShader::SetupGeometry");
 		Shader<ShaderKind::kUtility>::restoreGeometry = Patch(utility, Slot::kRestoreGeometry, &Shader<ShaderKind::kUtility>::RestoreGeometry, "BSUtilityShader::RestoreGeometry");
+		if (prePass) {
+			Shader<ShaderKind::kPrePass>::setupGeometry = Patch(prePass, Slot::kSetupGeometry, &Shader<ShaderKind::kPrePass>::SetupGeometry, "BSDFPrePassShader::SetupGeometry");
+			Shader<ShaderKind::kPrePass>::restoreGeometry = Patch(prePass, Slot::kRestoreGeometry, &Shader<ShaderKind::kPrePass>::RestoreGeometry, "BSDFPrePassShader::RestoreGeometry");
+		} else {
+			logger::warn("hooks: BSDFPrePassShader not hooked; only objects drawn by BSLightingShader can be batched");
+		}
 
 		Accumulator::start = Patch(accumulator, Slot::kStartAccumulating, &Accumulator::StartAccumulating, "BSShaderAccumulator::StartAccumulating");
 		Accumulator::finish[static_cast<std::size_t>(FinishKind::kFinish)] = Patch(accumulator, Slot::kFinishAccumulating, &Accumulator::Finish<FinishKind::kFinish>, "BSShaderAccumulator::FinishAccumulating");

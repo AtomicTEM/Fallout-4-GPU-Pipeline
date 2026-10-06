@@ -56,6 +56,10 @@ namespace GWP
 		// in a queue whose StartAccumulating was never seen
 		std::atomic<std::uint32_t> startedViewFrame{ 0 };
 		std::atomic<std::uint32_t> otherQueueFrame{ 0 };
+		// Some pass of the object is drawn by replaying a command buffer, which
+		// bypasses SetupGeometry; such objects cannot be batched.
+		std::atomic<bool> commandBuffers{ false };
+		Engine::MeshBuffers mesh;  // read at creation
 		std::atomic<ObjectState> state{ ObjectState::kTracking };
 		std::atomic<std::uint32_t> bucket{ kInvalidIndex };
 		std::atomic<std::uint32_t> member{ kInvalidIndex };
