@@ -111,6 +111,7 @@ namespace GWP
 		void FrameMaintenance(ID3D11DeviceContext* a_context, std::uint32_t a_frame);
 		void CollectGarbage(std::uint32_t a_frame);
 		void LogStats(std::uint32_t a_frame);
+		void LogObjectDiagnostics();
 
 		[[nodiscard]] bool BatchingActive() const noexcept
 		{
@@ -155,6 +156,32 @@ namespace GWP
 		StripedCounter _suppressed;
 		StripedCounter _carriers;
 		StripedCounter _evictions;
+		// Diagnostics for the stats lines (reset with them): how often tracked
+		// objects were found moved, and one example of a change and of a
+		// transform that matched neither convention.
+		struct TransformChange
+		{
+			RE::NiTransform before;
+			RE::NiTransform after;
+		};
+		struct TransformMismatch
+		{
+			RE::NiTransform world;
+			RE::NiBound model;
+			RE::NiBound worldBound;
+			bool stable{ false };
+		};
+		std::atomic<std::uint64_t> _stabilityChecks{ 0 };
+		std::atomic<std::uint64_t> _stabilityResets{ 0 };
+		std::atomic<std::uint64_t> _promotions{ 0 };
+		SpinLock _exampleLock;
+		std::optional<TransformChange> _changeExample;   // _exampleLock
+		std::optional<TransformMismatch> _mismatchExample;  // render thread
+		std::uint64_t _lightingDraws{ 0 };           // render thread
+		std::uint64_t _utilityDraws{ 0 };            // render thread
+		std::uint64_t _transformSamplesAll{ 0 };     // render thread
+		std::uint64_t _transformMatchesAll{ 0 };     // render thread
+
 		std::uint64_t _replacedDraws{ 0 };   // render thread
 		std::uint64_t _failedDraws{ 0 };     // render thread
 		std::uint64_t _captures{ 0 };        // render thread

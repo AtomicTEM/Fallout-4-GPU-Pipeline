@@ -212,7 +212,7 @@ namespace GWP
 		const auto now = std::chrono::steady_clock::now();
 		if (!reason.empty() && (key != _blockKey || now - _blockLogged >= 30s)) {
 			logger::info("calibration: batching on hold: {}", reason);
-			if (key == "outside"sv) {
+			if (key != "layout"sv && key != "frames"sv && key != "waiting"sv) {
 				LogSummary();
 			}
 			_blockLogged = now;

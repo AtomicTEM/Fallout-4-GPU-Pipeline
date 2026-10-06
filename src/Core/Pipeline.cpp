@@ -194,8 +194,16 @@ namespace GWP
 		}
 		std::scoped_lock lock{ std::adopt_lock, a_record.lock };
 
+		_stabilityChecks.fetch_add(1, std::memory_order_relaxed);
 		const auto* const object = Engine::AsAVObject(a_geometry);
 		if (!Math::NearlyEqual(object->world, a_record.world)) {
+			_stabilityResets.fetch_add(1, std::memory_order_relaxed);
+			if (_exampleLock.try_lock()) {
+				if (!_changeExample) {
+					_changeExample = TransformChange{ a_record.world, object->world };
+				}
+				_exampleLock.unlock();
+			}
 			a_record.world = object->world;
 			a_record.worldBound = object->worldBound;
 			a_record.stableSinceFrame = a_frame;
@@ -213,7 +221,9 @@ namespace GWP
 		a_record.shadowCaster = object->ShadowCaster();
 
 		auto expected = ObjectState::kTracking;
-		a_record.state.compare_exchange_strong(expected, ObjectState::kCandidate, std::memory_order_acq_rel);
+		if (a_record.state.compare_exchange_strong(expected, ObjectState::kCandidate, std::memory_order_acq_rel)) {
+			_promotions.fetch_add(1, std::memory_order_relaxed);
+		}
 	}
 
 	RenderPassArray* Pipeline::CallNormal(GetRenderPasses_t a_original, RE::BSShaderProperty* a_property, RE::BSGeometry* a_geometry, std::uint32_t a_mode, RE::BSShaderAccumulator* a_accumulator)
@@ -521,6 +531,7 @@ namespace GWP
 		}
 		tls.passDrawn = true;
 		_calibration.SampleObservedDraw();
+		++(tls.passShader == ShaderKind::kLighting ? _lightingDraws : _utilityDraws);
 
 		auto* const geometry = tls.passGeometry;
 		const bool batchMode = Settings::Get().mode == PipelineMode::kBatch;
@@ -536,12 +547,27 @@ namespace GWP
 		}
 
 		// Confirm the NiTransform convention (worldBound == world * modelBound)
-		// on a sample of the objects the engine draws.
+		// on a sample of the objects the engine draws. Only objects that have
+		// stayed still (the only ones ever batched) count: a moving object's
+		// bound can be a frame behind its transform.
 		if (!_calibration.Complete() && (++tls.sampleCounter & 7) == 0) {
 			const auto* const object = Engine::AsAVObject(geometry);
 			const auto& model = Engine::Field<RE::NiBound>(geometry, Engine::Offsets::kGeometryModelBound);
 			if (HasRotation(object->world) && std::abs(model.center.x) + std::abs(model.center.y) + std::abs(model.center.z) > 4.0F) {
-				_calibration.SampleTransform(TransformMatches(object->world, model, object->worldBound, false), TransformMatches(object->world, model, object->worldBound, true));
+				const bool rowMajor = TransformMatches(object->world, model, object->worldBound, false);
+				const bool transposed = TransformMatches(object->world, model, object->worldBound, true);
+				const auto* const record = _registry.Find(geometry);
+				const auto state = record ? record->state.load(std::memory_order_acquire) : ObjectState::kTracking;
+				const bool stable = state == ObjectState::kCandidate || state == ObjectState::kCaptured || state == ObjectState::kMember;
+				if (stable) {
+					_calibration.SampleTransform(rowMajor, transposed);
+				}
+				++_transformSamplesAll;
+				if (rowMajor || transposed) {
+					++_transformMatchesAll;
+				} else if (!_mismatchExample || (stable && !_mismatchExample->stable)) {
+					_mismatchExample = TransformMismatch{ object->world, model, object->worldBound, stable };
+				}
 			}
 		}
 
@@ -835,6 +861,57 @@ namespace GWP
 		}
 	}
 
+	void Pipeline::LogObjectDiagnostics()
+	{
+		std::array<std::uint32_t, 6> states{};
+		_registry.ForEach([&](ObjectRecord& a_record) {
+			const auto state = static_cast<std::size_t>(a_record.state.load(std::memory_order_relaxed));
+			if (state < states.size()) {
+				++states[state];
+			}
+		});
+		logger::info("stats: objects tracking {}, stable {}, captured {}, members {}, rejected {} | stability checks {}, found moved {}, became stable {} | draws lighting {}, utility {} | transform samples {} ({} matched)",
+			states[static_cast<std::size_t>(ObjectState::kTracking)], states[static_cast<std::size_t>(ObjectState::kCandidate)], states[static_cast<std::size_t>(ObjectState::kCaptured)],
+			states[static_cast<std::size_t>(ObjectState::kMember)], states[static_cast<std::size_t>(ObjectState::kRejected)],
+			_stabilityChecks.exchange(0, std::memory_order_relaxed), _stabilityResets.exchange(0, std::memory_order_relaxed), _promotions.exchange(0, std::memory_order_relaxed),
+			_lightingDraws, _utilityDraws, _transformSamplesAll, _transformMatchesAll);
+		_lightingDraws = 0;
+		_utilityDraws = 0;
+		_transformSamplesAll = 0;
+		_transformMatchesAll = 0;
+
+		const auto format = [](const RE::NiTransform& a_transform) {
+			const auto& r = a_transform.rotate.entry;
+			return fmt::format("rotate [{:.4f} {:.4f} {:.4f} | {:.4f} {:.4f} {:.4f} | {:.4f} {:.4f} {:.4f}] translate ({:.2f}, {:.2f}, {:.2f}) scale {:.4f}",
+				r[0].pt[0], r[0].pt[1], r[0].pt[2], r[1].pt[0], r[1].pt[1], r[1].pt[2], r[2].pt[0], r[2].pt[1], r[2].pt[2],
+				a_transform.translate.x, a_transform.translate.y, a_transform.translate.z, a_transform.scale);
+		};
+
+		std::optional<TransformChange> change;
+		{
+			std::scoped_lock lock{ _exampleLock };
+			change.swap(_changeExample);
+		}
+		if (change) {
+			logger::info("stats: example of a tracked object found moved: {} -> {}", format(change->before), format(change->after));
+		}
+
+		if (_mismatchExample) {
+			const auto& m = *_mismatchExample;
+			const double in[3]{ m.model.center.x, m.model.center.y, m.model.center.z };
+			double rowMajor[3]{};
+			double transposed[3]{};
+			Math::Affine::FromNiTransform(m.world, false).Apply(in, rowMajor);
+			Math::Affine::FromNiTransform(m.world, true).Apply(in, transposed);
+			logger::info("stats: example transform mismatch ({}): {} | model bound ({:.2f}, {:.2f}, {:.2f}) r {:.2f} | world bound ({:.2f}, {:.2f}, {:.2f}) r {:.2f} | world*model gives ({:.2f}, {:.2f}, {:.2f}), transposed ({:.2f}, {:.2f}, {:.2f})",
+				m.stable ? "stable object"sv : "object not yet stable"sv, format(m.world),
+				m.model.center.x, m.model.center.y, m.model.center.z, m.model.fRadius,
+				m.worldBound.center.x, m.worldBound.center.y, m.worldBound.center.z, m.worldBound.fRadius,
+				rowMajor[0], rowMajor[1], rowMajor[2], transposed[0], transposed[1], transposed[2]);
+			_mismatchExample.reset();
+		}
+	}
+
 	void Pipeline::LogStats(std::uint32_t a_frame)
 	{
 		const auto& settings = Settings::Get();
@@ -865,6 +942,8 @@ namespace GWP
 		logger::info("stats: views {:.1f}/frame, work items {:.0f}/frame, multi-draw calls {:.0f}, loop draws {:.0f}, fallback views {}, layout failures {}, occlusion views {} | arena VB {} MB IB {} MB",
 			perFrame(batches.views), perFrame(batches.workItems), perFrame(batches.multiDrawCalls), perFrame(batches.loopDraws), batches.fallbackViews, batches.layoutFailures, batches.occlusionViews,
 			buckets.vertexArenaUsed >> 20, buckets.indexArenaUsed >> 20);
+
+		LogObjectDiagnostics();
 
 		_batches.ResetStats();
 		_replacedDraws = 0;
