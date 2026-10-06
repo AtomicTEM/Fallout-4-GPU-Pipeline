@@ -12,8 +12,10 @@ namespace GWP
 		// share of them must have been drawn through SetupGeometry.
 		inline constexpr std::uint64_t kCheckAfterDetached = 2000;
 		inline constexpr std::uint64_t kMinDrawnPercent = 5;
-		// New buffers recorded for detached passes leak the detached ones.
+		// New buffers recorded for detached passes leak the detached ones, and so
+		// do passes freed while detached.
 		inline constexpr std::uint64_t kMaxRebuilt = 64;
+		inline constexpr std::uint64_t kMaxLost = 16;
 
 		[[nodiscard]] std::atomic_ref<std::byte*> CommandBuffer(void* a_pass) noexcept
 		{
@@ -36,14 +38,24 @@ namespace GWP
 			if (field.load(std::memory_order_relaxed)) {
 				if (!enabled) {
 					replays = true;
-				} else if (auto* const buffer = field.exchange(nullptr, std::memory_order_acq_rel)) {
+				} else {
 					// Another view may have detached it first this frame; only the
-					// thread that took the buffer owns putting it back.
+					// thread that took the buffer owns putting it back. Allocate
+					// first, so a failure can never lose a buffer already taken.
 					std::scoped_lock lock{ _lock };
-					_index[pass] = _entries.size();
-					_entries.push_back({ pass, buffer, a_geometry, a_reason == Reason::kAnchor ? a_bucket : nullptr, a_view, false });
-					_count.store(_entries.size(), std::memory_order_release);
-					++(a_reason == Reason::kAnchor ? _stats.anchors : _stats.captures);
+					_entries.reserve(_entries.size() + 1);
+					if (auto* const buffer = field.exchange(nullptr, std::memory_order_acq_rel)) {
+						_entries.push_back({ pass, buffer, a_geometry, a_reason == Reason::kAnchor ? a_bucket : nullptr, a_view, false });
+						try {
+							_index[pass] = _entries.size() - 1;
+						} catch (...) {
+							field.store(buffer, std::memory_order_release);
+							_entries.pop_back();
+							throw;
+						}
+						_count.store(_entries.size(), std::memory_order_release);
+						++(a_reason == Reason::kAnchor ? _stats.anchors : _stats.captures);
+					}
 				}
 			}
 			pass = Engine::Field<void*>(pass, Engine::Offsets::kPassPropertyNext);
@@ -51,7 +63,7 @@ namespace GWP
 		return !replays;
 	}
 
-	void ImmediatePasses::NoteSetup(const void* a_pass)
+	void ImmediatePasses::NoteDrawn(const void* a_pass)
 	{
 		if (_count.load(std::memory_order_acquire) == 0) {
 			return;
@@ -78,7 +90,10 @@ namespace GWP
 		std::uint64_t undrawnAnchors = 0;
 		std::uint64_t rebuilt = 0;
 		std::uint64_t lost = 0;
-		for (const auto& entry : _reattaching) {
+		// Newest first: should the engine have recorded a new buffer for a pass
+		// detached earlier in the frame, its newest buffer is the one restored.
+		for (auto it = _reattaching.rbegin(); it != _reattaching.rend(); ++it) {
+			const auto& entry = *it;
 			// The engine keeps a pass alive while it is registered, and the frame
 			// that registered it ends here; still, never touch a pass that no
 			// longer belongs to the geometry it was taken from.
@@ -114,11 +129,14 @@ namespace GWP
 		_totalDetached += detached;
 		_totalDrawn += drawn;
 		_totalRebuilt += rebuilt;
+		_totalLost += lost;
 		if (!Enabled()) {
 			return;
 		}
 		if (_totalRebuilt > kMaxRebuilt) {
 			Disable("the engine records new command buffers for passes whose buffer was detached");
+		} else if (_totalLost > kMaxLost) {
+			Disable("the engine frees passes while their command buffer is detached");
 		} else if (_totalDetached >= kCheckAfterDetached && _totalDrawn * 100 < _totalDetached * kMinDrawnPercent) {
 			Disable(fmt::format("only {} of {} passes without a command buffer were drawn through SetupGeometry", _totalDrawn, _totalDetached));
 		}

@@ -119,7 +119,8 @@ namespace GWP::D3DHooks
 		{
 			// DXGI_PRESENT_TEST only queries occlusion state; it is not a frame.
 			if ((a_flags & DXGI_PRESENT_TEST) == 0 && !t_inPresent) {
-				Guarded("Present", [&] { Pipeline::Get().OnPresent(a_this); });
+				// After a fault only the command buffers detached that frame are put back.
+				Guarded("Present", [] { Pipeline::Get().ReattachAfterFault(); }, [&] { Pipeline::Get().OnPresent(a_this); });
 			}
 			const bool outer = !t_inPresent;
 			t_inPresent = true;
@@ -132,7 +133,7 @@ namespace GWP::D3DHooks
 		{
 			// Some runtimes implement Present on top of Present1; count the frame once.
 			if ((a_flags & DXGI_PRESENT_TEST) == 0 && !t_inPresent) {
-				Guarded("Present1", [&] { Pipeline::Get().OnPresent(a_this); });
+				Guarded("Present1", [] { Pipeline::Get().ReattachAfterFault(); }, [&] { Pipeline::Get().OnPresent(a_this); });
 			}
 			const bool outer = !t_inPresent;
 			t_inPresent = true;

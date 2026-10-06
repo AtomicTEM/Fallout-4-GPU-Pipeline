@@ -55,12 +55,19 @@ it records none for some properties, whose passes take that path every frame.
 - at `Present` it puts every pointer back
 
 Nothing is allocated or freed on the engine's behalf, and passes it did not
-detach are untouched. It disables itself (command-buffer objects are then
-never batched, and live batches are retired) if fewer than 5% of 2000
-detached passes reach `SetupGeometry`, or if the engine records new buffers
-for detached passes. A batch whose detached anchor pass is not drawn in a view
-that was rendered counts a draw anomaly. `[Batching] bBatchCommandBufferObjects=0`
-turns it off.
+detach are untouched. After a plugin fault the `Present` hook still puts the
+pointers back. The self-check works on session totals. Detaching disables
+itself if any of these happen:
+
+- fewer than 5% of the first 2000 detached passes are drawn through
+  `SetupGeometry`
+- the engine records new buffers for more than 64 detached passes
+- more than 16 detached passes are freed before the end of their frame
+
+Once it is disabled, command-buffer objects are never batched again: live
+batches are retired and waiting candidates are rejected. A batch whose
+detached anchor pass is not drawn in a view that was rendered counts a draw
+anomaly. `[Batching] bBatchCommandBufferObjects=0` turns detaching off.
 
 All hooks are **vtable patches**:
 
@@ -107,6 +114,7 @@ Candidate ──(drawn through SetupGeometry; buffers captured)──► Capture
 Captured ──(group settles, GPU merge done)──► Member
 Member ──(moved / mesh or material changed)──► Evicted ──► record replaced
 Captured/Candidate ──(unsupported format, bad capture)──► Rejected (retried later)
+Candidate ──(command-buffer object, no capture after 8 routed frames)──► Rejected
 ```
 
 *Eligible* means:
@@ -116,9 +124,10 @@ Captured/Candidate ──(unsupported format, bad capture)──► Rejected (re
 - the vertex format has no skinning, landscape or eye data
 - there is no alpha blending (alpha testing is fine)
 
-**Capture** happens inside the engine's own draw of the object, the
-G-buffer pre-pass draw in a started view. Objects whose passes replay command
-buffers are routed through `SetupGeometry` for that frame. The plugin
+**Capture** happens inside the engine's own draw of the object: any
+`SetupGeometry` draw of a surface pass (pre-pass or forward). Candidates whose
+passes replay command buffers have their main-view passes routed through
+`SetupGeometry`, in started views, until one draw is captured. The plugin
 records:
 
 - the bound vertex buffer, stride and offset

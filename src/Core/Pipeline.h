@@ -69,6 +69,8 @@ namespace GWP
 		// Returns true when the draw was replaced and must not be forwarded.
 		bool OnDrawIndexed(ID3D11DeviceContext* a_context, UINT a_indexCount, UINT a_instanceCount, UINT a_startIndex, INT a_baseVertex, UINT a_startInstance, bool a_instanced);
 		void OnPresent(IDXGISwapChain* a_swapChain);
+		// Present after a plugin fault: only gives back detached command buffers.
+		void ReattachAfterFault() noexcept;
 		void ReportUnhookedContextClass() noexcept { _calibration.ReportUnhookedContextClass(); }
 
 	private:
@@ -91,6 +93,7 @@ namespace GWP
 			std::array<ViewFrame, 8> views{};
 			std::uint32_t depth{ 0 };
 
+			const void* pass{ nullptr };  // between SetupGeometry and RestoreGeometry
 			RE::BSGeometry* passGeometry{ nullptr };
 			ShaderKind passShader{ ShaderKind::kLighting };
 			bool inPass{ false };

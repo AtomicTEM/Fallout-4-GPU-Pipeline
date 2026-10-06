@@ -20,8 +20,10 @@ namespace GWP
 	// ReattachAll() puts every buffer back at the end of the frame. Nothing is
 	// allocated or freed on the engine's behalf.
 	//
-	// It checks itself: if detached passes are not drawn through SetupGeometry,
-	// or the engine records new buffers for them, it disables itself and
+	// It checks itself, over the whole session: if under 5% of the first 2000
+	// detached passes are drawn through SetupGeometry, or the engine records new
+	// buffers for more than 64 detached passes, or more than 16 detached passes
+	// are freed before the end of the frame, it disables itself and
 	// command-buffer objects are no longer batched.
 	class ImmediatePasses
 	{
@@ -36,7 +38,7 @@ namespace GWP
 		{
 			std::uint64_t captures{ 0 };        // passes detached for a capture
 			std::uint64_t anchors{ 0 };         // passes detached for an anchor
-			std::uint64_t drawn{ 0 };           // detached passes drawn through SetupGeometry
+			std::uint64_t drawn{ 0 };           // detached passes whose draw the D3D hook saw
 			std::uint64_t undrawnAnchors{ 0 };  // anchor passes not drawn in a view that was rendered
 			std::uint64_t rebuilt{ 0 };         // the engine gave a detached pass a new buffer
 			std::uint64_t lost{ 0 };            // the pass no longer belonged to its geometry
@@ -50,11 +52,13 @@ namespace GWP
 		// replays a command buffer afterwards (false when disabled and one does).
 		bool Detach(void* a_pass, const RE::BSGeometry* a_geometry, Reason a_reason, Bucket* a_bucket, const ViewState* a_view, std::uint32_t a_maxPasses);
 
-		// Any thread, from SetupGeometry.
-		void NoteSetup(const void* a_pass);
+		// Render thread, from the draw hook: a_pass (the pass between
+		// SetupGeometry and RestoreGeometry) was drawn.
+		void NoteDrawn(const void* a_pass);
 
 		// Render thread, at Present, before view counters are reset: puts every
-		// detached buffer back and checks that detaching works.
+		// detached buffer back and checks that detaching works. Also called
+		// after a plugin fault, when no other hook runs any more.
 		void ReattachAll();
 
 		[[nodiscard]] bool Enabled() const noexcept { return _enabled.load(std::memory_order_relaxed); }
@@ -88,5 +92,6 @@ namespace GWP
 		std::uint64_t _totalDetached{ 0 };
 		std::uint64_t _totalDrawn{ 0 };
 		std::uint64_t _totalRebuilt{ 0 };
+		std::uint64_t _totalLost{ 0 };
 	};
 }

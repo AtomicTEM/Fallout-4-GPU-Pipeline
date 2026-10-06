@@ -610,12 +610,12 @@ namespace GWP
 		tls.inPass = true;
 		tls.passDrawn = false;
 		tls.passShader = a_kind;
+		tls.pass = a_pass;
 		tls.passGeometry = nullptr;
 
 		if (!Ready() || !a_pass) {
 			return;
 		}
-		_immediatePasses.NoteSetup(a_pass);
 		const auto offset = _calibration.PassGeometryOffset();
 		if (!offset) {
 			return;
@@ -661,6 +661,7 @@ namespace GWP
 			_calibration.SampleMissedDraw();
 		}
 		tls.inPass = false;
+		tls.pass = nullptr;
 		tls.passGeometry = nullptr;
 	}
 
@@ -681,6 +682,7 @@ namespace GWP
 			return false;
 		}
 		tls.passDrawn = true;
+		_immediatePasses.NoteDrawn(tls.pass);
 		_calibration.SampleObservedDraw();
 		++(IsSurfacePass(tls.passShader) ? _lightingDraws : _utilityDraws);
 
@@ -727,7 +729,8 @@ namespace GWP
 		// Otherwise capture the engine's buffers for objects waiting to be merged.
 		if (batchMode && IsSurfacePass(tls.passShader)) {
 			auto* const record = _registry.Find(geometry);
-			if (record && record->state.load(std::memory_order_acquire) == ObjectState::kCandidate && record->Matches(geometry)) {
+			if (record && record->state.load(std::memory_order_acquire) == ObjectState::kCandidate && record->Matches(geometry) &&
+				(!record->commandBuffers.load(std::memory_order_relaxed) || CommandBufferObjectsBatchable())) {
 				Capture(a_context, *record, a_indexCount, a_instanceCount, a_startIndex, a_baseVertex);
 			}
 		}
@@ -937,6 +940,14 @@ namespace GWP
 		FrameMaintenance(_immediate.Get(), frame);
 	}
 
+	void Pipeline::ReattachAfterFault() noexcept
+	{
+		try {
+			_immediatePasses.ReattachAll();
+		} catch (...) {
+		}
+	}
+
 	void Pipeline::FrameMaintenance(ID3D11DeviceContext* a_context, std::uint32_t a_frame)
 	{
 		auto& settings = Settings::Get();
@@ -946,8 +957,17 @@ namespace GWP
 		// detached from them (before the view counters below are reset).
 		_immediatePasses.ReattachAll();
 		if (_immediatePassesEnabled && !_immediatePasses.Enabled()) {
+			// Command-buffer objects can no longer be captured or anchor a batch.
 			_immediatePassesEnabled = false;
 			_buckets.RetireAll(a_frame);
+			_registry.ForEach([&](ObjectRecord& a_record) {
+				auto expected = ObjectState::kCandidate;
+				if (a_record.commandBuffers.load(std::memory_order_relaxed) &&
+					a_record.state.compare_exchange_strong(expected, ObjectState::kRejected, std::memory_order_acq_rel)) {
+					std::scoped_lock lock{ a_record.lock };
+					a_record.stableSinceFrame = a_frame;
+				}
+			});
 		}
 
 		// Hotkey: toggle batching for A/B comparisons.
