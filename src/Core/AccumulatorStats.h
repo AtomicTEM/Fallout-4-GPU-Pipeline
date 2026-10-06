@@ -21,7 +21,7 @@ namespace GWP
 			std::atomic<std::uintptr_t> vtable{ 0 };
 
 			std::atomic<std::uint32_t> starts{ 0 };
-			std::array<std::atomic<std::uint32_t>, 3> finishes{};       // FinishKind
+			std::array<std::atomic<std::uint32_t>, 4> finishes{};       // FinishKind
 			std::array<std::atomic<std::uint32_t>, 2> registrations{};  // PassKind: main, shadow
 			std::atomic<std::uint32_t> withoutEpoch{ 0 };               // registered before any hooked StartAccumulating
 			std::array<std::atomic<std::uint64_t>, 2> modes{};          // render modes (< 64) seen, per PassKind

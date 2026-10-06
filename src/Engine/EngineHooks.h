@@ -44,4 +44,11 @@ namespace GWP::EngineHooks
 
 	// Primary vtable of BSShaderAccumulator (the accumulator hooks).
 	[[nodiscard]] std::uintptr_t AccumulatorVTable() noexcept;
+
+	// Wraps the calls to DrawWorld::DeferredPrePass in DrawWorld::Render_PreUI
+	// (one call-site patch through the F4SE trampoline). The world
+	// accumulator's StartAccumulating/FinishAccumulating never go through the
+	// vtable; DeferredPrePass is where its G-buffer passes are drawn. Returns
+	// false (and patches nothing) if the call cannot be identified.
+	bool InstallMainPassHook();
 }

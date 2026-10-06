@@ -28,7 +28,20 @@ accumulator->FinishAccumulating[PreResolveDepth|PostResolveDepth]()   // 0x29/0x
 
 Opaque world geometry is drawn into the G-buffer by `BSDFPrePassShader` and
 into shadow maps by `BSUtilityShader`; `BSLightingShader` only draws forward
-passes. Every visible object costs a pass registration, the engine's state
+passes.
+
+Shadow-map accumulators follow this sequence through the vtable. The world
+accumulator of the main camera does not: its `StartAccumulating` and
+`FinishAccumulating*` never reach the vtable hooks, and its G-buffer passes
+are drawn inside `DrawWorld::DeferredPrePass`. The plugin therefore treats it
+specially:
+
+- the accumulator that queues the most main-view objects without a hooked
+  `StartAccumulating` (first person excluded) is the main view
+- its epoch is opened at `Present`
+- the call to `DrawWorld::DeferredPrePass` in `DrawWorld::Render_PreUI` is
+  wrapped and acts as its `FinishAccumulating`
+- after it, the view is closed: later registrations never carry a batch Every visible object costs a pass registration, the engine's state
 setup and a D3D11 draw, all on the CPU. The plugin keeps the first half (the
 engine still decides which objects exist and are visible) and replaces the
 second half for batched objects.
@@ -78,10 +91,13 @@ All hooks are **vtable patches**:
 - One import-table patch on `Fallout4.exe` (`D3D11CreateDevice*`) sees the
   device before the renderer creates its input layouts.
 
-No executable code is patched and no raw addresses are used. The only engine
-data the plugin writes is the command buffer pointer of the passes it routes
-through `SetupGeometry`, restored the same frame (see
-[Command buffers](#command-buffers)).
+No raw addresses are used. The only code patch is the call to
+`DrawWorld::DeferredPrePass` in `DrawWorld::Render_PreUI`, found at runtime
+by CommonLibF4RD's call-site search (both IDs from the runtime database) and
+redirected through the F4SE trampoline. If the call cannot be identified, the
+main view is not batched. The only engine data the plugin writes is the
+command buffer pointer of the passes it routes through `SetupGeometry`,
+restored the same frame (see [Command buffers](#command-buffers)).
 
 ## 2. Components
 

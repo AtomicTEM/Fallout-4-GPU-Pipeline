@@ -175,6 +175,23 @@ namespace GWP::EngineHooks
 			static inline Start_t start{ nullptr };
 			static inline std::array<Finish_t, 3> finish{};
 		};
+
+		struct MainPass
+		{
+			using DeferredPrePass_t = std::uintptr_t (*)(void*, void*, void*, void*);
+
+			// Arguments and result pass through untouched whatever the real
+			// signature is (x64: rcx, rdx, r8, r9 in, rax out).
+			static std::uintptr_t DeferredPrePass(void* a_1, void* a_2, void* a_3, void* a_4)
+			{
+				Guarded("DeferredPrePass (begin)", [] { Pipeline::Get().OnMainPassBegin(); });
+				const auto result = deferredPrePass(a_1, a_2, a_3, a_4);
+				Guarded("DeferredPrePass (end)", [] { Pipeline::Get().OnMainPassEnd(); });
+				return result;
+			}
+
+			static inline DeferredPrePass_t deferredPrePass{ nullptr };
+		};
 	}
 
 	std::uintptr_t TriShapeVTable() noexcept
@@ -233,6 +250,31 @@ namespace GWP::EngineHooks
 		Accumulator::finish[static_cast<std::size_t>(FinishKind::kFinish)] = Patch(accumulator, Slot::kFinishAccumulating, &Accumulator::Finish<FinishKind::kFinish>, "BSShaderAccumulator::FinishAccumulating");
 		Accumulator::finish[static_cast<std::size_t>(FinishKind::kPreResolveDepth)] = Patch(accumulator, Slot::kFinishAccumulatingPreResolveDepth, &Accumulator::Finish<FinishKind::kPreResolveDepth>, "BSShaderAccumulator::FinishAccumulatingPreResolveDepth");
 		Accumulator::finish[static_cast<std::size_t>(FinishKind::kPostResolveDepth)] = Patch(accumulator, Slot::kFinishAccumulatingPostResolveDepth, &Accumulator::Finish<FinishKind::kPostResolveDepth>, "BSShaderAccumulator::FinishAccumulatingPostResolveDepth");
+		return true;
+	}
+
+	bool InstallMainPassHook()
+	{
+		constexpr REL::ID renderPreUI{ 984743, 2318321 };     // DrawWorld::Render_PreUI
+		constexpr REL::ID deferredPrePass{ 56596, 2318301 };  // DrawWorld::DeferredPrePass
+		const auto calls = REL::resolve_callsites(renderPreUI, deferredPrePass);
+		if (!calls) {
+			logger::warn("hooks: no call to DrawWorld::DeferredPrePass found in DrawWorld::Render_PreUI ({}); the main view is not batched",
+				REL::id_resolve_status_text(calls.status));
+			return false;
+		}
+
+		// One 14-byte jump stub per call site.
+		F4SE::AllocTrampoline(16 * calls.rvas.size());
+		auto& trampoline = F4SE::GetTrampoline();
+		const auto base = REL::Module::get().base();
+		for (const auto rva : calls.rvas) {
+			const auto original = trampoline.write_call<5>(base + rva, &MainPass::DeferredPrePass);
+			if (!MainPass::deferredPrePass) {
+				MainPass::deferredPrePass = reinterpret_cast<MainPass::DeferredPrePass_t>(original);
+			}
+			logger::info("hooks: DrawWorld::DeferredPrePass call at +0x{:X} (original at +0x{:X})", rva, original - base);
+		}
 		return true;
 	}
 }

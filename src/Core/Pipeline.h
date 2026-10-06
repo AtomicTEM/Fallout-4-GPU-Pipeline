@@ -30,7 +30,8 @@ namespace GWP
 	{
 		kFinish,
 		kPreResolveDepth,
-		kPostResolveDepth
+		kPostResolveDepth,
+		kDeferredPrePass  // DrawWorld::DeferredPrePass, the main view's draw window
 	};
 
 	using RenderPassArray = RE::BSShaderProperty::RenderPassArray;
@@ -63,6 +64,10 @@ namespace GWP
 		void OnStartAccumulating(RE::BSShaderAccumulator* a_accumulator);
 		void OnFinishBegin(RE::BSShaderAccumulator* a_accumulator, FinishKind a_kind);
 		void OnFinishEnd(RE::BSShaderAccumulator* a_accumulator, FinishKind a_kind);
+		// DrawWorld::DeferredPrePass: the main view's accumulator draws its
+		// G-buffer passes; it is treated like its FinishAccumulating.
+		void OnMainPassBegin();
+		void OnMainPassEnd();
 		void OnSetupGeometry(ShaderKind a_kind, RE::BSRenderPass* a_pass);
 		void OnRestoreGeometry(ShaderKind a_kind, RE::BSRenderPass* a_pass);
 
@@ -157,6 +162,9 @@ namespace GWP
 		void BuildHiZ(ID3D11DeviceContext* a_context, ViewState& a_view);
 		[[nodiscard]] static std::optional<bool> DetectReversedZ(const RE::NiCamera* a_camera);
 		void FrameMaintenance(ID3D11DeviceContext* a_context, std::uint32_t a_frame);
+		// Render thread, at Present: picks the main view's accumulator and opens
+		// its epoch for the next frame.
+		void PrepareMainView(std::uint32_t a_frame);
 		void CollectGarbage(std::uint32_t a_frame);
 		void LogStats(std::uint32_t a_frame);
 		void LogObjectDiagnostics();
@@ -176,6 +184,13 @@ namespace GWP
 		std::atomic<std::uint32_t> _frame{ 1 };
 
 		std::uintptr_t _triShapeVTable{ 0 };
+
+		// Main view: the world accumulator, whose StartAccumulating and
+		// FinishAccumulating never reach the vtable hooks. Its epoch is opened
+		// at Present and its passes are drawn in DrawWorld::DeferredPrePass.
+		bool _mainPassHooked{ false };
+		std::atomic<RE::BSShaderAccumulator*> _mainPassAccumulator{ nullptr };
+		ViewState* _mainPassView{ nullptr };  // render thread
 
 		ID3D11Device* _device{ nullptr };
 		Microsoft::WRL::ComPtr<ID3D11DeviceContext> _immediate;

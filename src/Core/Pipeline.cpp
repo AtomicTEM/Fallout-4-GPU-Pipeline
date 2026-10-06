@@ -74,6 +74,7 @@ namespace GWP
 		}
 		_triShapeVTable = EngineHooks::TriShapeVTable();
 		_hooksInstalled = true;
+		_mainPassHooked = EngineHooks::InstallMainPassHook();
 
 		if (!D3DHooks::InstallCreateDeviceHooks()) {
 			logger::warn("pipeline: D3D11 device creation imports not found; device hooks will be installed late");
@@ -413,8 +414,17 @@ namespace GWP
 
 		// Only registrations in a view whose StartAccumulating was seen are ever
 		// batched; calibration uses this to judge where the passes are drawn.
-		const auto* const queue = _views.Find(a_accumulator);
-		const bool started = queue && queue->epoch.load(std::memory_order_relaxed) != 0;
+		// Main registrations give their accumulator a view, so the world
+		// accumulator (whose StartAccumulating is never hooked) can become the
+		// main view (PrepareMainView).
+		auto* const queue = a_kind == PassKind::kMain ? _views.Acquire(a_accumulator) : _views.Find(a_accumulator);
+		if (queue && a_kind == PassKind::kMain) {
+			queue->mainRegistrations.fetch_add(1, std::memory_order_relaxed);
+			if (a_accumulator->firstPerson) {
+				queue->firstPerson.store(true, std::memory_order_relaxed);
+			}
+		}
+		const bool started = queue && queue->epoch.load(std::memory_order_relaxed) != 0 && !queue->closed.load(std::memory_order_relaxed);
 		(started ? record->startedViewFrame : record->otherQueueFrame).store(frame, std::memory_order_relaxed);
 
 		const auto queueIndex = _accumulators.IndexOf(a_accumulator);
@@ -480,6 +490,10 @@ namespace GWP
 		if (epoch == 0) {
 			// StartAccumulating was never seen for this accumulator: no batching in it.
 			_calibration.SampleRegistrationBeforeStart();
+			return CallNormal(a_original, a_property, a_geometry, a_mode, a_accumulator, record);
+		}
+		if (view->closed.load(std::memory_order_acquire)) {
+			// The view was already drawn: a batch carried now would never be drawn.
 			return CallNormal(a_original, a_property, a_geometry, a_mode, a_accumulator, record);
 		}
 
@@ -608,6 +622,25 @@ namespace GWP
 		const auto capacity = std::max<std::uint32_t>(_buckets.TotalActiveMembers() * 2 + 4096, 4096);
 		_views.Begin(*view, capacity, _frame.load(std::memory_order_relaxed));
 		view->starts.fetch_add(1, std::memory_order_relaxed);
+		view->hookedStart.store(true, std::memory_order_relaxed);
+	}
+
+	void Pipeline::OnMainPassBegin()
+	{
+		// Without a main view the window still counts as a draw window, so
+		// nested draws are attributed consistently; it has no view.
+		OnFinishBegin(_mainPassAccumulator.load(std::memory_order_acquire), FinishKind::kDeferredPrePass);
+	}
+
+	void Pipeline::OnMainPassEnd()
+	{
+		auto& tls = TLS();
+		auto* const view = tls.depth > 0 && tls.depth <= tls.views.size() ? tls.views[tls.depth - 1].view : nullptr;
+		OnFinishEnd(nullptr, FinishKind::kDeferredPrePass);
+		if (view) {
+			// Registrations after the G-buffer pass must not suppress members.
+			view->closed.store(true, std::memory_order_release);
+		}
 	}
 
 	void Pipeline::OnFinishBegin(RE::BSShaderAccumulator* a_accumulator, FinishKind a_kind)
@@ -615,7 +648,7 @@ namespace GWP
 		_activeFinishes.fetch_add(1, std::memory_order_relaxed);
 		auto& tls = TLS();
 		if (tls.depth < tls.views.size()) {
-			auto* const view = Ready() ? _views.Find(a_accumulator) : nullptr;
+			auto* const view = Ready() && a_accumulator ? _views.Find(a_accumulator) : nullptr;
 			const auto queue = Ready() ? _accumulators.IndexOf(a_accumulator) : AccumulatorStats::kNone;
 			tls.views[tls.depth] = { view, view ? view->epoch.load(std::memory_order_acquire) : 0, a_kind, queue };
 			if (view) {
@@ -1061,6 +1094,8 @@ namespace GWP
 			});
 		}
 
+		PrepareMainView(a_frame);
+
 		// Hotkey: toggle batching for A/B comparisons.
 		if (settings.toggleKey != 0) {
 			const bool down = (::GetAsyncKeyState(static_cast<int>(settings.toggleKey)) & 0x8000) != 0;
@@ -1114,6 +1149,58 @@ namespace GWP
 		_views.Collect(a_frame);
 
 		LogStats(a_frame);
+	}
+
+	void Pipeline::PrepareMainView(std::uint32_t a_frame)
+	{
+		if (!_mainPassHooked) {
+			return;
+		}
+
+		// The main view is the accumulator that queued the most main-view
+		// objects without a hooked StartAccumulating (first person excluded).
+		ViewState* best = nullptr;
+		std::uint32_t bestCount = 0;
+		std::uint32_t currentCount = 0;
+		_views.ForEach([&](ViewState& a_view) {
+			const auto count = a_view.mainRegistrations.exchange(0, std::memory_order_relaxed);
+			if (&a_view == _mainPassView) {
+				currentCount = count;
+			}
+			if (a_view.hookedStart.load(std::memory_order_relaxed) || a_view.firstPerson.load(std::memory_order_relaxed)) {
+				return;
+			}
+			if (count > bestCount) {
+				best = &a_view;
+				bestCount = count;
+			}
+		});
+
+		// Keep the current one unless another clearly queues more; counts jump
+		// in menus, loading screens and cell transitions.
+		auto* chosen = _mainPassView;
+		if (!chosen || chosen->hookedStart.load(std::memory_order_relaxed) || chosen->firstPerson.load(std::memory_order_relaxed) ||
+			(best && bestCount > currentCount * 2 + 64)) {
+			chosen = best;
+		}
+		if (chosen != _mainPassView) {
+			if (_mainPassView) {
+				// The old view has no draw window any more: never carry a batch in it.
+				_mainPassView->closed.store(true, std::memory_order_release);
+				_mainPassView->epoch.store(0, std::memory_order_release);
+			}
+			_mainPassView = chosen;
+			const auto* const accumulator = chosen ? chosen->accumulator.load(std::memory_order_acquire) : nullptr;
+			_mainPassAccumulator.store(const_cast<RE::BSShaderAccumulator*>(accumulator), std::memory_order_release);
+			logger::info("pipeline: main view is accumulator #{} ({} main registrations last frame)", _accumulators.IndexOf(accumulator), chosen ? bestCount : 0);
+		}
+
+		// Its epoch runs from this Present to the end of the next DeferredPrePass.
+		if (_mainPassView) {
+			const auto capacity = std::max<std::uint32_t>(_buckets.TotalActiveMembers() * 2 + 4096, 4096);
+			_views.Begin(*_mainPassView, capacity, a_frame);
+			_mainPassView->closed.store(false, std::memory_order_release);
+		}
 	}
 
 	void Pipeline::CollectGarbage(std::uint32_t a_frame)
@@ -1251,6 +1338,7 @@ namespace GWP
 			const auto finish = take(a_slot.finishes[0]);
 			const auto preResolve = take(a_slot.finishes[1]);
 			const auto postResolve = take(a_slot.finishes[2]);
+			const auto mainPass = take(a_slot.finishes[3]);
 			const auto mainRegistrations = take(a_slot.registrations[0]);
 			const auto shadowRegistrations = take(a_slot.registrations[1]);
 			const auto withoutEpoch = take(a_slot.withoutEpoch);
@@ -1263,14 +1351,14 @@ namespace GWP
 			const auto replays = take(a_slot.replays);
 			const auto outside = take(a_slot.drawnOutside);
 			const auto elsewhere = take(a_slot.drawnElsewhere);
-			if (starts + finish + preResolve + postResolve + mainRegistrations + shadowRegistrations + surface + utility + replays + outside + elsewhere == 0) {
+			if (starts + finish + preResolve + postResolve + mainPass + mainRegistrations + shadowRegistrations + surface + utility + replays + outside + elsewhere == 0) {
 				return;
 			}
 			const auto vtable = a_slot.vtable.load(std::memory_order_relaxed);
 			const auto name = vtable ? EngineHooks::ClassName(vtable) : std::string_view{};
-			logger::info("stats: accumulator #{} {}{} | StartAccumulating {}, FinishAccumulating {}/PreResolveDepth {}/PostResolveDepth {} | registrations main {} (modes {}) shadow {} (modes {}), without StartAccumulating {} | carriers {} suppressed {} | inside its FinishAccumulating: surface setups {}, utility setups {}, replayed draws {} | its objects' setups outside every FinishAccumulating {}, in another accumulator's {}",
+			logger::info("stats: accumulator #{} {}{} | StartAccumulating {}, FinishAccumulating {}/PreResolveDepth {}/PostResolveDepth {}, DeferredPrePass {} | registrations main {} (modes {}) shadow {} (modes {}), without StartAccumulating {} | carriers {} suppressed {} | inside its draw windows: surface setups {}, utility setups {}, replayed draws {} | its objects' setups outside every draw window {}, in another accumulator's {}",
 				a_index, name.empty() ? fmt::format("vtable@{:X}", vtable) : std::string{ name }, vtable == EngineHooks::AccumulatorVTable() ? ""sv : " (not the hooked vtable)"sv,
-				starts, finish, preResolve, postResolve, mainRegistrations, modeList(mainModes), shadowRegistrations, modeList(shadowModes), withoutEpoch,
+				starts, finish, preResolve, postResolve, mainPass, mainRegistrations, modeList(mainModes), shadowRegistrations, modeList(shadowModes), withoutEpoch,
 				carriers, suppressed, surface, utility, replays, outside, elsewhere);
 		});
 		if (const auto untracked = _accumulators.TakeUntracked()) {
