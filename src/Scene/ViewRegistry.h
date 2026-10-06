@@ -32,6 +32,7 @@ namespace GWP
 		std::atomic<bool> hookedStart{ false };              // StartAccumulating reached the vtable hook
 		std::atomic<bool> firstPerson{ false };              // BSShaderAccumulator::firstPerson
 		std::atomic<std::uint32_t> mainRegistrations{ 0 };  // per frame, reset at Present
+		std::atomic<std::uint32_t> drawnEpoch{ 0 };         // epoch whose first batch draw happened
 		std::uint32_t lightingSetups{ 0 };       // render thread
 		std::uint32_t utilitySetups{ 0 };        // render thread
 

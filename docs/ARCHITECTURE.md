@@ -43,7 +43,13 @@ view** without patching any code:
   view and epoch (`src/Core/CarriedPasses.*`). The draw of a recorded pass is
   the draw of its batch in that view, wherever the engine issues it.
 - A recorded pass that is never drawn counts as an anomaly of its batch, so a
-  batch whose members would stay hidden is retired. Every visible object costs a pass registration, the engine's state
+  batch whose members would stay hidden is retired.
+- After the first batch draw of an epoch, later registrations in the world
+  view draw themselves, so a second accumulation cannot hide objects.
+- Inside a started hooked view, only that view's carriers count, so a
+  world-view batch is never drawn into a shadow map.
+
+Every visible object costs a pass registration, the engine's state
 setup and a D3D11 draw, all on the CPU. The plugin keeps the first half (the
 engine still decides which objects exist and are visible) and replaces the
 second half for batched objects.

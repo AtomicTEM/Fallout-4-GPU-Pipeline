@@ -47,6 +47,9 @@ namespace GWP
 		bool DrawBucket(ID3D11DeviceContext* a_context, Bucket& a_bucket, std::uint32_t a_epoch);
 
 		[[nodiscard]] IndirectMode ActiveMode() const noexcept { return _mode; }
+		// Epoch of the view prepared last; the per-batch draw state belongs to it.
+		[[nodiscard]] std::uint32_t CurrentEpoch() const noexcept { return _currentEpoch; }
+
 		[[nodiscard]] const BatchStats& Stats() const noexcept { return _stats; }
 		void ResetStats() noexcept { _stats = {}; }
 

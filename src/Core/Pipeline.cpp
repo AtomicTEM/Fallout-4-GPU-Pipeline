@@ -504,6 +504,12 @@ namespace GWP
 			_calibration.SampleRegistrationBeforeStart();
 			return CallNormal(a_original, a_property, a_geometry, a_mode, a_accumulator, record);
 		}
+		if (!view->hookedStart.load(std::memory_order_relaxed) && view->drawnEpoch.load(std::memory_order_acquire) == epoch) {
+			// The world view's epoch only ends at Present. Once its batches were
+			// drawn, a later registration must not hide anything.
+			_lateRegistrations.Add();
+			return CallNormal(a_original, a_property, a_geometry, a_mode, a_accumulator, record);
+		}
 
 		if (!_views.Append(*view, member)) {
 			// The view's list is full. Other members can simply draw themselves,
@@ -849,12 +855,17 @@ namespace GWP
 			return a_view && a_epoch != 0 && a_bucket.gates[_views.IndexOf(a_view)].load(std::memory_order_acquire) == a_epoch;
 		};
 		const bool inFinish = a_tls.depth > 0 && a_tls.depth <= a_tls.views.size() && a_tls.views[a_tls.depth - 1].view;
+		// Inside a started hooked view, only that view's own carrier counts: a
+		// world-view batch must never be drawn into, say, a shadow map.
+		const bool inStartedFinish = inFinish && a_tls.views[a_tls.depth - 1].epoch != 0;
+		const auto carried = inStartedFinish ? std::nullopt : _carriedPasses.Find(a_tls.pass);
 		ViewFrame frame{};
 		if (inFinish && carriedIn(a_tls.views[a_tls.depth - 1].view, a_tls.views[a_tls.depth - 1].epoch)) {
 			frame = a_tls.views[a_tls.depth - 1];
-		} else if (const auto carried = _carriedPasses.Find(a_tls.pass); carried && carried->bucket == &a_bucket && carriedIn(carried->view, carried->epoch)) {
+		} else if (carried && carried->bucket == &a_bucket && carriedIn(carried->view, carried->epoch)) {
 			frame.view = carried->view;
 			frame.epoch = carried->epoch;
+			carried->view->drawnEpoch.store(carried->epoch, std::memory_order_release);
 		} else {
 			// Not carried here: the anchor draws itself, which is right unless a
 			// carrier detached this pass for a view and it is drawn elsewhere.
@@ -892,7 +903,10 @@ namespace GWP
 			}
 		}
 
-		if (view.preparedEpoch != frame.epoch) {
+		// Batches keep one set of draw state, valid for the view prepared last:
+		// prepare again if another view was prepared since (the world view's
+		// draws can interleave with hooked views').
+		if (view.preparedEpoch != frame.epoch || _batches.CurrentEpoch() != frame.epoch) {
 			const auto& settings = Settings::Get();
 			const auto currentFrame = _frame.load(std::memory_order_relaxed);
 			const bool occlusion = settings.occlusionCulling && &view == _mainView.load(std::memory_order_relaxed) && !_cameraCut && _hiz.UsableFor(currentFrame);
@@ -1300,7 +1314,8 @@ namespace GWP
 			_immediatePasses.Enabled() ? ""sv : " (off: command-buffer objects are not batched)"sv);
 
 		const auto carried = _carriedPasses.TakeStats();
-		logger::info("stats: world view anchor passes carried {}, drawn {}, not drawn {}", carried.carried, carried.drawn, carried.undrawn);
+		logger::info("stats: world view anchor passes carried {}, drawn {}, not drawn {} | registrations after its batches were drawn {}",
+			carried.carried, carried.drawn, carried.undrawn, _lateRegistrations.Take());
 
 		const auto routes = [this](CaptureRoute a_route) {
 			return _captureRoutes[static_cast<std::size_t>(a_route)].exchange(0, std::memory_order_relaxed);

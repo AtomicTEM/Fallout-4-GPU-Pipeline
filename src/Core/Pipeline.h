@@ -224,6 +224,7 @@ namespace GWP
 		StripedCounter _suppressed;
 		StripedCounter _carriers;
 		StripedCounter _evictions;
+		StripedCounter _lateRegistrations;  // world-view registrations after its batches were drawn
 		std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(CaptureRoute::kCount)> _captureRoutes{};
 		AccumulatorStats _accumulators;
 		// What happened to anchor draws that reached DrawBatch (render thread)
