@@ -38,7 +38,7 @@ namespace GWP::EngineHooks
 			const auto& module = REL::Module::get();
 			const auto base = module.base();
 			const auto end = base + module.image_size();
-			const auto inImage = [&](std::uintptr_t a_address, std::size_t a_size) { return a_address >= base && a_address + a_size <= end; };
+			const auto inImage = [&](std::uintptr_t a_address, std::size_t a_size) { return a_address >= base && a_address <= end && a_size <= end - a_address; };
 
 			constexpr auto kPointer = sizeof(std::uintptr_t);
 			if (!inImage(a_vtable - kPointer, kPointer)) {

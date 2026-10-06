@@ -61,7 +61,14 @@ namespace GWP
 					}
 				}
 			}
+			_untracked.fetch_add(1, std::memory_order_relaxed);
 			return kNone;
+		}
+
+		// Calls for accumulators that found no free slot since the last call.
+		[[nodiscard]] std::uint64_t TakeUntracked() noexcept
+		{
+			return _untracked.exchange(0, std::memory_order_relaxed);
 		}
 
 		[[nodiscard]] Slot* At(std::uint8_t a_index) noexcept
@@ -81,5 +88,6 @@ namespace GWP
 
 	private:
 		std::array<Slot, kSlots> _slots;
+		std::atomic<std::uint64_t> _untracked{ 0 };
 	};
 }

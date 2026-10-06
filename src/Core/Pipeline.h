@@ -213,6 +213,8 @@ namespace GWP
 		std::uint64_t _anchorNotCarriedDetached{ 0 };  // ... although a carrier detached the pass for another view
 		std::uint64_t _anchorOutside{ 0 };             // drawn outside every hooked FinishAccumulating
 		std::uint64_t _anchorOutsideDetached{ 0 };     // ... although a carrier detached the pass
+		std::uint64_t _anchorNoView{ 0 };              // inside a hooked FinishAccumulating of an accumulator without a view
+		std::uint64_t _anchorUnstartedView{ 0 };       // inside the FinishAccumulating of a view never started
 		std::uint64_t _anchorInstanced{ 0 };
 		std::uint64_t _anchorPrepareFailed{ 0 };
 		std::uint64_t _anchorDrawFailed{ 0 };
