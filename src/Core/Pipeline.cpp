@@ -127,9 +127,9 @@ namespace GWP
 		}
 
 		if (!settings.batchCommandBufferObjects) {
-			_immediate.Disable("turned off in the INI (bBatchCommandBufferObjects=0)");
+			_immediatePasses.Disable("turned off in the INI (bBatchCommandBufferObjects=0)");
 		}
-		_immediateWasEnabled = _immediate.Enabled();
+		_immediatePassesEnabled = _immediatePasses.Enabled();
 
 		_renderThread = std::this_thread::get_id();
 		_ready.store(true, std::memory_order_release);
@@ -209,7 +209,7 @@ namespace GWP
 
 	bool Pipeline::CommandBufferObjectsBatchable() const noexcept
 	{
-		return CommandBuffersDetectable() && _immediate.Enabled();
+		return CommandBuffersDetectable() && _immediatePasses.Enabled();
 	}
 
 	bool Pipeline::WantsCaptureDraw(ObjectRecord& a_record, PassKind a_kind, std::uint32_t a_mode, bool a_started, std::uint32_t a_frame)
@@ -233,7 +233,7 @@ namespace GWP
 			}
 			return false;
 		}
-		if (!_immediate.ReserveCapture(a_frame, kCaptureDrawsPerFrame)) {
+		if (!_immediatePasses.ReserveCapture(a_frame, kCaptureDrawsPerFrame)) {
 			_captureBudgetSkips.Add();
 			return false;
 		}
@@ -246,7 +246,7 @@ namespace GWP
 		if (!a_pass || !CommandBuffersDetectable() || !Engine::Field<const void*>(a_pass, Engine::Offsets::kPassCommandBuffer)) {
 			return;
 		}
-		if (!_immediate.Detach(a_pass, a_bucket.anchor, ImmediatePasses::Reason::kAnchor, &a_bucket, nullptr, 1)) {
+		if (!_immediatePasses.Detach(a_pass, a_bucket.anchor, ImmediatePasses::Reason::kAnchor, &a_bucket, nullptr, 1)) {
 			a_bucket.retireRequested.store(true, std::memory_order_relaxed);
 			a_bucket.drawAnomalies.fetch_add(100, std::memory_order_relaxed);
 		}
@@ -365,7 +365,7 @@ namespace GWP
 			_calibration.SamplePass(passes->passList, a_geometry);
 		}
 		if (InspectPasses(a_record, passes, a_geometry) && a_detachForCapture) {
-			_immediate.Detach(passes->passList, a_geometry, ImmediatePasses::Reason::kCapture, nullptr, nullptr, kMaxPassWalk);
+			_immediatePasses.Detach(passes->passList, a_geometry, ImmediatePasses::Reason::kCapture, nullptr, nullptr, kMaxPassWalk);
 		}
 
 		tls.lastGeometry = a_geometry;
@@ -490,7 +490,7 @@ namespace GWP
 		tls.lastBucket = bucket;
 		auto* const passes = a_original(bucket->anchorProperty, bucket->anchor, a_mode, a_accumulator);
 		if (InspectPasses(_registry.Find(bucket->anchor), passes, bucket->anchor) &&
-			!_immediate.Detach(passes->passList, bucket->anchor, ImmediatePasses::Reason::kAnchor, bucket, view, kMaxPassWalk)) {
+			!_immediatePasses.Detach(passes->passList, bucket->anchor, ImmediatePasses::Reason::kAnchor, bucket, view, kMaxPassWalk)) {
 			// The anchor's draw would be replayed from a command buffer and never
 			// reach DrawBatch; stop using this batch.
 			bucket->retireRequested.store(true, std::memory_order_relaxed);
@@ -615,7 +615,7 @@ namespace GWP
 		if (!Ready() || !a_pass) {
 			return;
 		}
-		_immediate.NoteSetup(a_pass);
+		_immediatePasses.NoteSetup(a_pass);
 		const auto offset = _calibration.PassGeometryOffset();
 		if (!offset) {
 			return;
@@ -944,9 +944,9 @@ namespace GWP
 
 		// The frame's passes have been drawn: give back the command buffers
 		// detached from them (before the view counters below are reset).
-		_immediate.ReattachAll();
-		if (_immediateWasEnabled && !_immediate.Enabled()) {
-			_immediateWasEnabled = false;
+		_immediatePasses.ReattachAll();
+		if (_immediatePassesEnabled && !_immediatePasses.Enabled()) {
+			_immediatePassesEnabled = false;
 			_buckets.RetireAll(a_frame);
 		}
 
@@ -1098,10 +1098,10 @@ namespace GWP
 			commandBufferObjects, CommandBuffersDetectable() ? ""sv : " (pass layout unconfirmed: nothing is batched)"sv);
 		logger::info("stats: replayed draws {} (sampled {}: one object {}, several objects {}, unknown {}) | meshes {} in {} vertex buffers, {} at a non-zero buffer offset, {} descriptor mismatches",
 			_replayDraws, _replaySamples, _replayMatched, _replayAmbiguous, _replayUnmatched, _meshMap.size(), _meshVertexBuffers, _meshPooled, _meshDescMismatches);
-		const auto detached = _immediate.TakeStats();
+		const auto detached = _immediatePasses.TakeStats();
 		logger::info("stats: command buffers detached for captures {}, for anchors {}; drawn {}, anchor passes not drawn {}, rebuilt by the engine {}, lost {} | capture draws deferred {}, given up {}{}",
 			detached.captures, detached.anchors, detached.drawn, detached.undrawnAnchors, detached.rebuilt, detached.lost,
-			_captureBudgetSkips.Take(), _captureGiveUps.Take(), _immediate.Enabled() ? ""sv : " (off: command-buffer objects are not batched)"sv);
+			_captureBudgetSkips.Take(), _captureGiveUps.Take(), _immediatePasses.Enabled() ? ""sv : " (off: command-buffer objects are not batched)"sv);
 		_replayDraws = 0;
 		_replaySamples = 0;
 		_replayMatched = 0;

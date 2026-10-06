@@ -159,8 +159,8 @@ namespace GWP
 		Microsoft::WRL::ComPtr<ID3D11DeviceContext> _immediate;
 
 		Calibration _calibration;
-		ImmediatePasses _immediate;
-		bool _immediateWasEnabled{ true };  // render thread
+		ImmediatePasses _immediatePasses;
+		bool _immediatePassesEnabled{ true };  // render thread
 		ObjectRegistry _registry;
 		ViewRegistry _views;
 		ShaderLibrary _shaders;
