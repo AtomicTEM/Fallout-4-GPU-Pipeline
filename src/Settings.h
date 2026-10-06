@@ -38,6 +38,7 @@ namespace GWP
 		bool batchShadows{ true };
 		bool useCanMerge{ true };
 		bool rotateBitangentW{ true };
+		bool batchCommandBufferObjects{ true };
 
 		// [Culling]
 		bool occlusionCulling{ true };

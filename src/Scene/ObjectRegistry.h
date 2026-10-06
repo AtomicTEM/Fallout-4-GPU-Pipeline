@@ -57,8 +57,11 @@ namespace GWP
 		std::atomic<std::uint32_t> startedViewFrame{ 0 };
 		std::atomic<std::uint32_t> otherQueueFrame{ 0 };
 		// Some pass of the object is drawn by replaying a command buffer, which
-		// bypasses SetupGeometry; such objects cannot be batched.
+		// bypasses SetupGeometry; its capture draw has to be routed through
+		// SetupGeometry (see ImmediatePasses).
 		std::atomic<bool> commandBuffers{ false };
+		std::atomic<std::uint32_t> detachFrame{ 0 };     // last frame its passes were detached for a capture
+		std::atomic<std::uint32_t> detachAttempts{ 0 };  // frames detached since it became a candidate
 		Engine::MeshBuffers mesh;  // read at creation
 		std::atomic<ObjectState> state{ ObjectState::kTracking };
 		std::atomic<std::uint32_t> bucket{ kInvalidIndex };

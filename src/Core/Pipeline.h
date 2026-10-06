@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Core/Calibration.h"
+#include "Core/ImmediatePasses.h"
 #include "Render/BatchRenderer.h"
 #include "Render/HiZ.h"
 #include "Render/ShaderLibrary.h"
@@ -106,12 +107,23 @@ namespace GWP
 
 		[[nodiscard]] static bool QuickEligible(RE::BSGeometry* a_geometry) noexcept;
 		[[nodiscard]] ObjectRecord* Track(RE::BSGeometry* a_geometry, std::uint32_t a_frame);
-		[[nodiscard]] RenderPassArray* CallNormal(GetRenderPasses_t a_original, RE::BSShaderProperty* a_property, RE::BSGeometry* a_geometry, std::uint32_t a_mode, RE::BSShaderAccumulator* a_accumulator, ObjectRecord* a_record = nullptr);
+		// Lets the engine build the object's passes. a_detachForCapture routes
+		// passes that would replay a command buffer through SetupGeometry for
+		// this frame, so the capture sees the draw.
+		[[nodiscard]] RenderPassArray* CallNormal(GetRenderPasses_t a_original, RE::BSShaderProperty* a_property, RE::BSGeometry* a_geometry, std::uint32_t a_mode, RE::BSShaderAccumulator* a_accumulator, ObjectRecord* a_record = nullptr, bool a_detachForCapture = false);
 		// Walks the passes the engine returned for a_geometry: records shader
 		// statistics and whether any pass replays a command buffer. Returns true
 		// if one does.
 		bool InspectPasses(ObjectRecord* a_record, const RenderPassArray* a_passes, const RE::BSGeometry* a_geometry) noexcept;
 		[[nodiscard]] bool CommandBuffersDetectable() const noexcept;
+		// Objects drawn from command buffers can be captured and anchor batches.
+		[[nodiscard]] bool CommandBufferObjectsBatchable() const noexcept;
+		// Whether this registration of a command-buffer candidate should be
+		// drawn through SetupGeometry so its buffers can be captured.
+		[[nodiscard]] bool WantsCaptureDraw(ObjectRecord& a_record, PassKind a_kind, std::uint32_t a_mode, bool a_started, std::uint32_t a_frame);
+		// Routes a batch anchor's depth pass through SetupGeometry, or retires
+		// the batch if that is not possible.
+		void DetachAnchorDepthPass(Bucket& a_bucket, RE::BSRenderPass* a_pass);
 		void SampleReplayDraw(ID3D11DeviceContext* a_context);
 		void RebuildMeshMap(std::uint32_t a_frame);
 		void UpdateStability(ObjectRecord& a_record, RE::BSGeometry* a_geometry, std::uint32_t a_frame);
@@ -147,6 +159,8 @@ namespace GWP
 		Microsoft::WRL::ComPtr<ID3D11DeviceContext> _immediate;
 
 		Calibration _calibration;
+		ImmediatePasses _immediate;
+		bool _immediateWasEnabled{ true };  // render thread
 		ObjectRegistry _registry;
 		ViewRegistry _views;
 		ShaderLibrary _shaders;
@@ -170,6 +184,8 @@ namespace GWP
 		StripedCounter _suppressed;
 		StripedCounter _carriers;
 		StripedCounter _evictions;
+		StripedCounter _captureBudgetSkips;  // capture draws deferred to a later frame
+		StripedCounter _captureGiveUps;      // candidates whose capture draw never came
 		// Diagnostics for the stats lines (reset with them): how often tracked
 		// objects were found moved, and one example of a change and of a
 		// transform that matched neither convention.

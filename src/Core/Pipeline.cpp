@@ -19,6 +19,13 @@ namespace GWP
 		inline constexpr std::uint32_t kGarbageAge = 1800;
 		inline constexpr std::uint32_t kRejectedRetry = 3600;
 
+		// Passes walked per object (an object has a handful).
+		inline constexpr std::uint32_t kMaxPassWalk = 16;
+		// Candidates drawn from command buffers whose capture draw is routed
+		// through SetupGeometry per frame, and frames tried before giving up.
+		inline constexpr std::uint32_t kCaptureDrawsPerFrame = 128;
+		inline constexpr std::uint32_t kMaxCaptureAttempts = 8;
+
 		[[nodiscard]] bool TransformMatches(const RE::NiTransform& a_world, const RE::NiBound& a_model, const RE::NiBound& a_worldBound, bool a_transposed) noexcept
 		{
 			const auto affine = Math::Affine::FromNiTransform(a_world, a_transposed);
@@ -119,6 +126,11 @@ namespace GWP
 			}
 		}
 
+		if (!settings.batchCommandBufferObjects) {
+			_immediate.Disable("turned off in the INI (bBatchCommandBufferObjects=0)");
+		}
+		_immediateWasEnabled = _immediate.Enabled();
+
 		_renderThread = std::this_thread::get_id();
 		_ready.store(true, std::memory_order_release);
 		logger::info("pipeline: ready ({} mode); batching starts once calibration passes", Settings::Get().mode == PipelineMode::kBatch ? "batch"sv : "observe"sv);
@@ -195,6 +207,51 @@ namespace GWP
 		return offset && *offset == Engine::Offsets::kPassGeometry;
 	}
 
+	bool Pipeline::CommandBufferObjectsBatchable() const noexcept
+	{
+		return CommandBuffersDetectable() && _immediate.Enabled();
+	}
+
+	bool Pipeline::WantsCaptureDraw(ObjectRecord& a_record, PassKind a_kind, std::uint32_t a_mode, bool a_started, std::uint32_t a_frame)
+	{
+		if (a_kind != PassKind::kMain || !a_started || !a_record.commandBuffers.load(std::memory_order_relaxed) ||
+			a_record.state.load(std::memory_order_acquire) != ObjectState::kCandidate ||
+			Settings::Get().mode != PipelineMode::kBatch || !BatchingActive() || !CommandBufferObjectsBatchable() ||
+			!_calibration.ModeAllowed(a_kind, a_mode)) {
+			return false;
+		}
+		if (a_record.detachFrame.exchange(a_frame, std::memory_order_relaxed) == a_frame) {
+			return false;  // already routed in another view this frame
+		}
+		if (a_record.detachAttempts.load(std::memory_order_relaxed) >= kMaxCaptureAttempts) {
+			// Its draw never reached the capture; leave it to the engine for a while.
+			auto expected = ObjectState::kCandidate;
+			if (a_record.state.compare_exchange_strong(expected, ObjectState::kRejected, std::memory_order_acq_rel)) {
+				std::scoped_lock lock{ a_record.lock };
+				a_record.stableSinceFrame = a_frame;
+				_captureGiveUps.Add();
+			}
+			return false;
+		}
+		if (!_immediate.ReserveCapture(a_frame, kCaptureDrawsPerFrame)) {
+			_captureBudgetSkips.Add();
+			return false;
+		}
+		a_record.detachAttempts.fetch_add(1, std::memory_order_relaxed);
+		return true;
+	}
+
+	void Pipeline::DetachAnchorDepthPass(Bucket& a_bucket, RE::BSRenderPass* a_pass)
+	{
+		if (!a_pass || !CommandBuffersDetectable() || !Engine::Field<const void*>(a_pass, Engine::Offsets::kPassCommandBuffer)) {
+			return;
+		}
+		if (!_immediate.Detach(a_pass, a_bucket.anchor, ImmediatePasses::Reason::kAnchor, &a_bucket, nullptr, 1)) {
+			a_bucket.retireRequested.store(true, std::memory_order_relaxed);
+			a_bucket.drawAnomalies.fetch_add(100, std::memory_order_relaxed);
+		}
+	}
+
 	bool Pipeline::InspectPasses(ObjectRecord* a_record, const RenderPassArray* a_passes, const RE::BSGeometry* a_geometry) noexcept
 	{
 		if (!a_passes || !a_passes->passList || !CommandBuffersDetectable()) {
@@ -204,7 +261,7 @@ namespace GWP
 		const auto& shaders = EngineHooks::HookedShaderVTables();
 		bool commandBuffer = false;
 		const void* pass = a_passes->passList;
-		for (std::uint32_t i = 0; pass && i < 16; ++i) {
+		for (std::uint32_t i = 0; pass && i < kMaxPassWalk; ++i) {
 			if (Engine::Field<const RE::BSGeometry*>(pass, Engine::Offsets::kPassGeometry) != a_geometry) {
 				_passWalkMismatches.fetch_add(1, std::memory_order_relaxed);
 				break;
@@ -271,12 +328,13 @@ namespace GWP
 			return;
 		}
 
-		// Objects drawn from command buffers cannot be batched yet: their draws
-		// bypass SetupGeometry, so a batch anchored on one would never be drawn.
+		// Whether an object replays command buffers is only known once the pass
+		// layout is confirmed. Such objects need their passes routed through
+		// SetupGeometry to be captured and to anchor a batch (ImmediatePasses).
 		if (!CommandBuffersDetectable()) {
 			return;
 		}
-		if (a_record.commandBuffers.load(std::memory_order_relaxed)) {
+		if (a_record.commandBuffers.load(std::memory_order_relaxed) && !CommandBufferObjectsBatchable()) {
 			auto expected = ObjectState::kTracking;
 			a_record.state.compare_exchange_strong(expected, ObjectState::kRejected, std::memory_order_acq_rel);
 			return;
@@ -287,6 +345,7 @@ namespace GWP
 		a_record.numTriangles = Engine::Geometry::NumTriangles(a_geometry);
 		a_record.alpha = Engine::AlphaState::Read(Engine::Geometry::AlphaProperty(a_geometry));
 		a_record.shadowCaster = object->ShadowCaster();
+		a_record.detachAttempts.store(0, std::memory_order_relaxed);
 
 		auto expected = ObjectState::kTracking;
 		if (a_record.state.compare_exchange_strong(expected, ObjectState::kCandidate, std::memory_order_acq_rel)) {
@@ -294,7 +353,7 @@ namespace GWP
 		}
 	}
 
-	RenderPassArray* Pipeline::CallNormal(GetRenderPasses_t a_original, RE::BSShaderProperty* a_property, RE::BSGeometry* a_geometry, std::uint32_t a_mode, RE::BSShaderAccumulator* a_accumulator, ObjectRecord* a_record)
+	RenderPassArray* Pipeline::CallNormal(GetRenderPasses_t a_original, RE::BSShaderProperty* a_property, RE::BSGeometry* a_geometry, std::uint32_t a_mode, RE::BSShaderAccumulator* a_accumulator, ObjectRecord* a_record, bool a_detachForCapture)
 	{
 		auto& tls = TLS();
 		tls.lastGeometry = a_geometry;
@@ -305,7 +364,9 @@ namespace GWP
 		if (passes && passes->passList && (!_calibration.PassGeometryOffset() || (++tls.sampleCounter & 15) == 0)) {
 			_calibration.SamplePass(passes->passList, a_geometry);
 		}
-		InspectPasses(a_record, passes, a_geometry);
+		if (InspectPasses(a_record, passes, a_geometry) && a_detachForCapture) {
+			_immediate.Detach(passes->passList, a_geometry, ImmediatePasses::Reason::kCapture, nullptr, nullptr, kMaxPassWalk);
+		}
 
 		tls.lastGeometry = a_geometry;
 		tls.lastDecision = Decision::kNormal;
@@ -356,7 +417,8 @@ namespace GWP
 			member = anchored->firstMember;
 		}
 		if (!bucket || bucket->state.load(std::memory_order_acquire) != BucketState::kActive) {
-			return CallNormal(a_original, a_property, a_geometry, a_mode, a_accumulator, record);
+			const bool detach = WantsCaptureDraw(*record, a_kind, a_mode, started, frame);
+			return CallNormal(a_original, a_property, a_geometry, a_mode, a_accumulator, record, detach);
 		}
 
 		// Is batching enabled for this kind of view?
@@ -425,8 +487,10 @@ namespace GWP
 		// belong to the anchor itself.
 		tls.lastGeometry = bucket->anchor;
 		tls.lastDecision = Decision::kNormal;
+		tls.lastBucket = bucket;
 		auto* const passes = a_original(bucket->anchorProperty, bucket->anchor, a_mode, a_accumulator);
-		if (InspectPasses(_registry.Find(bucket->anchor), passes, bucket->anchor)) {
+		if (InspectPasses(_registry.Find(bucket->anchor), passes, bucket->anchor) &&
+			!_immediate.Detach(passes->passList, bucket->anchor, ImmediatePasses::Reason::kAnchor, bucket, view, kMaxPassWalk)) {
 			// The anchor's draw would be replayed from a command buffer and never
 			// reach DrawBatch; stop using this batch.
 			bucket->retireRequested.store(true, std::memory_order_relaxed);
@@ -464,12 +528,16 @@ namespace GWP
 				{
 					auto* const bucket = tls.lastBucket;
 					auto* const pass = a_original(bucket->anchorProperty, bucket->anchor);
+					DetachAnchorDepthPass(*bucket, pass);
 					_calibration.SampleDepthPass(true, pass != nullptr);
 					return pass;
 				}
 			default:
 				{
 					auto* const pass = a_original(a_property, a_geometry);
+					if (auto* const bucket = tls.lastBucket; bucket && bucket->anchor == a_geometry) {
+						DetachAnchorDepthPass(*bucket, pass);  // the anchor's own registration carried its batch
+					}
 					_calibration.SampleDepthPass(true, pass != nullptr);
 					return pass;
 				}
@@ -547,6 +615,7 @@ namespace GWP
 		if (!Ready() || !a_pass) {
 			return;
 		}
+		_immediate.NoteSetup(a_pass);
 		const auto offset = _calibration.PassGeometryOffset();
 		if (!offset) {
 			return;
@@ -873,6 +942,14 @@ namespace GWP
 		auto& settings = Settings::Get();
 		_renderThread = std::this_thread::get_id();
 
+		// The frame's passes have been drawn: give back the command buffers
+		// detached from them (before the view counters below are reset).
+		_immediate.ReattachAll();
+		if (_immediateWasEnabled && !_immediate.Enabled()) {
+			_immediateWasEnabled = false;
+			_buckets.RetireAll(a_frame);
+		}
+
 		// Hotkey: toggle batching for A/B comparisons.
 		if (settings.toggleKey != 0) {
 			const bool down = (::GetAsyncKeyState(static_cast<int>(settings.toggleKey)) & 0x8000) != 0;
@@ -1021,6 +1098,10 @@ namespace GWP
 			commandBufferObjects, CommandBuffersDetectable() ? ""sv : " (pass layout unconfirmed: nothing is batched)"sv);
 		logger::info("stats: replayed draws {} (sampled {}: one object {}, several objects {}, unknown {}) | meshes {} in {} vertex buffers, {} at a non-zero buffer offset, {} descriptor mismatches",
 			_replayDraws, _replaySamples, _replayMatched, _replayAmbiguous, _replayUnmatched, _meshMap.size(), _meshVertexBuffers, _meshPooled, _meshDescMismatches);
+		const auto detached = _immediate.TakeStats();
+		logger::info("stats: command buffers detached for captures {}, for anchors {}; drawn {}, anchor passes not drawn {}, rebuilt by the engine {}, lost {} | capture draws deferred {}, given up {}{}",
+			detached.captures, detached.anchors, detached.drawn, detached.undrawnAnchors, detached.rebuilt, detached.lost,
+			_captureBudgetSkips.Take(), _captureGiveUps.Take(), _immediate.Enabled() ? ""sv : " (off: command-buffer objects are not batched)"sv);
 		_replayDraws = 0;
 		_replaySamples = 0;
 		_replayMatched = 0;

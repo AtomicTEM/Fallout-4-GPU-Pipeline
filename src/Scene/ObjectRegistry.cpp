@@ -52,6 +52,8 @@ namespace GWP
 		record->startedViewFrame.store(0, std::memory_order_relaxed);
 		record->otherQueueFrame.store(0, std::memory_order_relaxed);
 		record->commandBuffers.store(false, std::memory_order_relaxed);
+		record->detachFrame.store(0, std::memory_order_relaxed);
+		record->detachAttempts.store(0, std::memory_order_relaxed);
 		record->mesh = Engine::MeshBuffers::Read(a_geometry);
 		record->state.store(ObjectState::kTracking, std::memory_order_release);
 

@@ -45,7 +45,7 @@ The renderer hooks can only be verified in Fallout 4. Recommended procedure:
 
 1. **Observe first.** Set `[General] iMode=0`, start the game and load a
    save. In `GPUWorldPipeline.log` look for:
-   - `hooks: ... slot ...` lines for all 11 engine hooks, and
+   - `hooks: ... slot ...` lines for all 13 engine hooks, and
      `d3d: device vtable hooked` (ideally before `pipeline: ready`)
    - `calibration: BSRenderPass geometry pointer at +0x..`
    - `calibration: batching on hold: ...`. In observe mode the plugin still
@@ -80,6 +80,7 @@ Include the full log and the following:
 | Batching never enables | The calibration line names the reason | Report the line |
 | Objects missing in shadows only | Shadow-view carrier issue | `bBatchShadows=0` |
 | Objects missing or flickering in the main view | Main-view routing or depth pre-pass pairing | `bBatchMainView=0` |
+| Crash or missing objects since batching of command-buffer objects | The engine does not draw passes without a command buffer as expected | `bBatchCommandBufferObjects=0` |
 | Objects pop in during fast turns | Occlusion disocclusion | `bOcclusionCulling=0`, or raise `fOcclusionDepthBias` |
 | Wrong lighting on batched objects | Anchor-specific per-object constants | `bBatchMainView=0`; report which objects |
 | Distorted normals on rotated objects | Bitangent/normal encoding assumption | `bRotateBitangentW=0` |

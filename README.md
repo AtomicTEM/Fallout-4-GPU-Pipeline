@@ -226,6 +226,7 @@ These are the ones that matter most:
 | `[General] iMode` | `1` | `0` only observes and logs; `1` batches |
 | `[General] iToggleKey` | `121` (F10) | Toggles batching in game |
 | `[Batching] bBatchMainView` / `bBatchShadows` | `1` / `1` | Which views are batched |
+| `[Batching] bBatchCommandBufferObjects` | `1` | Batch objects the engine draws from recorded command buffers (most world geometry) |
 | `[Culling] bOcclusionCulling` | `1` | Previous-frame Hi-Z occlusion for the main view |
 | `[Culling] iIndirectMode` | `0` | Auto, compaction, NVAPI multi-draw, or draw loop |
 | `[Memory] iArenaVertexMB` / `iArenaIndexMB` | `512` / `192` | VRAM budget for merged geometry |

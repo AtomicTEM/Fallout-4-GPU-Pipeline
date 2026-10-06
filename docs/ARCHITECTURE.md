@@ -18,15 +18,49 @@ scene graph cull (frustum, PreVis, occlusion planes, rooms/portals)
        property->GetRenderDepthPass(geom)                              // 0x30
 accumulator->FinishAccumulating[PreResolveDepth|PostResolveDepth]()   // 0x29/0x2E/0x2F
    for each registered BSRenderPass:
-       shader->SetupGeometry(pass)      // BSLightingShader / BSUtilityShader, slot 7
-       context->DrawIndexed(...)        // ID3D11DeviceContext slot 12
-       shader->RestoreGeometry(pass)    // slot 8
+       if pass->commandBuffer:
+           replay the recorded commands, ending in context->DrawIndexed(...)
+       else:
+           shader->SetupGeometry(pass)  // BSDFPrePassShader / BSLightingShader / BSUtilityShader, slot 7
+           context->DrawIndexed(...)    // ID3D11DeviceContext slot 12
+           shader->RestoreGeometry(pass)  // slot 8
 ```
 
-Every visible object costs a pass registration, the engine's state setup and
-a D3D11 draw, all on the CPU. The plugin keeps the first half (the engine still
-decides which objects exist and are visible) and replaces the second half for
-batched objects.
+Opaque world geometry is drawn into the G-buffer by `BSDFPrePassShader` and
+into shadow maps by `BSUtilityShader`; `BSLightingShader` only draws forward
+passes. Every visible object costs a pass registration, the engine's state
+setup and a D3D11 draw, all on the CPU. The plugin keeps the first half (the
+engine still decides which objects exist and are visible) and replaces the
+second half for batched objects.
+
+### Command buffers
+
+Most passes carry a command buffer (`BSRenderPass+0x00`) that the engine
+recorded when it created the pass. Replaying it binds the object's buffers
+and constants and draws without calling `SetupGeometry`. In a measured AE
+session, 97% of eligible objects and every pre-pass and shadow pass of theirs
+were drawn this way. A replayed draw cannot be told apart by its buffers
+either: the engine pools all meshes into a handful of vertex and index
+buffers.
+
+The engine draws a pass whose command buffer is null through `SetupGeometry`;
+it records none for some properties, whose passes take that path every frame.
+`ImmediatePasses` (`src/Core/ImmediatePasses.*`) uses that:
+
+- after `GetRenderPasses` returns the passes the plugin needs to see, and
+  before the engine registers them, it swaps their command buffer pointer for
+  null: the anchor's passes whenever they carry a batch, and a batch
+  candidate's main-view passes for the frame of its capture (at most 128
+  candidates per frame, 8 frames each)
+- at `Present` it puts every pointer back
+
+Nothing is allocated or freed on the engine's behalf, and passes it did not
+detach are untouched. It disables itself (command-buffer objects are then
+never batched, and live batches are retired) if fewer than 5% of 2000
+detached passes reach `SetupGeometry`, or if the engine records new buffers
+for detached passes. A batch whose detached anchor pass is not drawn in a view
+that was rendered counts a draw anomaly. `[Batching] bBatchCommandBufferObjects=0`
+turns it off.
 
 All hooks are **vtable patches**:
 
@@ -37,7 +71,10 @@ All hooks are **vtable patches**:
 - One import-table patch on `Fallout4.exe` (`D3D11CreateDevice*`) sees the
   device before the renderer creates its input layouts.
 
-No executable code is patched and no raw addresses are used.
+No executable code is patched and no raw addresses are used. The only engine
+data the plugin writes is the command buffer pointer of the passes it routes
+through `SetupGeometry`, restored the same frame (see
+[Command buffers](#command-buffers)).
 
 ## 2. Components
 
@@ -47,6 +84,7 @@ No executable code is patched and no raw addresses are used.
 | Engine hooks | `src/Engine/EngineHooks.*`, `src/Engine/Layouts.h` | Vtable hooks; field offsets the plugin reads |
 | D3D hooks | `src/Render/D3DHooks.*`, `src/Render/InputLayouts.*` | Device creation, input layout capture, draw interception, Present/Present1 |
 | Orchestration | `src/Core/Pipeline.*` | Receives every hook and owns all subsystems |
+| | `src/Core/ImmediatePasses.*` | Routes passes that would replay a command buffer through `SetupGeometry` for one frame |
 | Verification | `src/Core/Calibration.*` | Runtime checks that gate batching |
 | Scene | `src/Scene/ObjectRegistry.*` | Per-geometry state machine |
 | | `src/Scene/ViewRegistry.*` | Per-accumulator epochs and visibility lists |
@@ -65,7 +103,7 @@ Each eligible geometry gets an `ObjectRecord` (`src/Scene/ObjectRegistry.h`):
 
 ```text
 Tracking ──(transform unchanged for iStableFrames)──► Candidate
-Candidate ──(drawn by BSLightingShader; buffers captured)──► Captured
+Candidate ──(drawn through SetupGeometry; buffers captured)──► Captured
 Captured ──(group settles, GPU merge done)──► Member
 Member ──(moved / mesh or material changed)──► Evicted ──► record replaced
 Captured/Candidate ──(unsupported format, bad capture)──► Rejected (retried later)
@@ -78,7 +116,9 @@ Captured/Candidate ──(unsupported format, bad capture)──► Rejected (re
 - the vertex format has no skinning, landscape or eye data
 - there is no alpha blending (alpha testing is fine)
 
-**Capture** happens inside the engine's own draw of the object. The plugin
+**Capture** happens inside the engine's own draw of the object, the
+G-buffer pre-pass draw in a started view. Objects whose passes replay command
+buffers are routed through `SetupGeometry` for that frame. The plugin
 records:
 
 - the bound vertex buffer, stride and offset
@@ -138,7 +178,8 @@ freed memory.
 ```text
 StartAccumulating(A)        new epoch E for view A; clear A's list
 GetRenderPasses(member m)   append m to list(A, E)
-  first member of batch B   gate[B][A] := E  → return the anchor's passes ("carrier")
+  first member of batch B   gate[B][A] := E  → return the anchor's passes ("carrier"),
+                            command buffers detached so they reach SetupGeometry
   any other member of B     return an empty pass list ("suppressed")
 GetRenderDepthPass(m)       paired with the decision above: anchor's depth pass / none
 FinishAccumulating(A)       thread-local view stack = (A, E)
@@ -150,7 +191,8 @@ FinishAccumulating(A)       thread-local view stack = (A, E)
   ...
 FinishAccumulatingPreResolveDepth(main view) exit:
      copy depth → build Hi-Z (used by the next frame's main view)
-Present:   calibration, batch maintenance (merge, retire, free), statistics
+Present:   reattach command buffers, calibration, batch maintenance (merge,
+           retire, free), statistics
 ```
 
 These properties make the substitution safe:

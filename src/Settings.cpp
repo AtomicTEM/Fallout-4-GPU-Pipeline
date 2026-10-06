@@ -55,6 +55,7 @@ namespace GWP
 		batchShadows = ReadBool("Batching", "bBatchShadows", batchShadows);
 		useCanMerge = ReadBool("Batching", "bUseCanMerge", useCanMerge);
 		rotateBitangentW = ReadBool("Batching", "bRotateBitangentW", rotateBitangentW);
+		batchCommandBufferObjects = ReadBool("Batching", "bBatchCommandBufferObjects", batchCommandBufferObjects);
 
 		occlusionCulling = ReadBool("Culling", "bOcclusionCulling", occlusionCulling);
 		occlusionDepthBias = std::clamp(ReadFloat("Culling", "fOcclusionDepthBias", occlusionDepthBias), 0.0F, 0.1F);
@@ -78,7 +79,7 @@ namespace GWP
 		logger::info("settings: enabled={} mode={} toggleKey=0x{:X}", enabled, mode == PipelineMode::kBatch ? "batch"sv : "observe"sv, toggleKey);
 		logger::info("settings: batching minMembers={} maxMembers={} maxVertices={} grid={} settle={} stable={} budget={}",
 			minMembers, maxMembersPerBucket, maxVerticesPerBucket, gridSize, settleFrames, stableFrames, ingestVertexBudget);
-		logger::info("settings: mainView={} shadows={} canMerge={} rotateBitangentW={}", batchMainView, batchShadows, useCanMerge, rotateBitangentW);
+		logger::info("settings: mainView={} shadows={} canMerge={} rotateBitangentW={} commandBufferObjects={}", batchMainView, batchShadows, useCanMerge, rotateBitangentW, batchCommandBufferObjects);
 		logger::info("settings: occlusion={} bias={} cameraCut={} indirectMode={}", occlusionCulling, occlusionDepthBias, cameraCutDistance, static_cast<std::uint32_t>(indirectMode));
 		logger::info("settings: arena VB={}MB IB={}MB ring={}MB staging={}MB", arenaVertexMB, arenaIndexMB, ringIndexMB, stagingMB);
 	}
